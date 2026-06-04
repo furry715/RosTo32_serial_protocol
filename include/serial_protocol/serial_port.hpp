@@ -32,11 +32,14 @@ public:
         cfsetospeed(&tty, speed);
         cfsetispeed(&tty, speed);
 
-        // 8N1, ÎÞÁ÷¿Ø
+        // 8N1, ??????????????
         tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
-        tty.c_iflag &= ~(INPCK | ISTRIP | IXON | IXOFF | IXANY);
-        tty.c_oflag = 0;
-        tty.c_lflag = 0;
+        tty.c_cflag |= CLOCAL | CREAD;
+        tty.c_cflag &= ~(PARENB | CSTOPB);
+        // ????? ICRNL ???? 0x0D(\r) ???? 0x0A(\n)
+        tty.c_iflag &= ~(INPCK | ISTRIP | IXON | IXOFF | IXANY | ICRNL | INLCR | IGNCR);
+        tty.c_oflag &= ~(OPOST | ONLCR | OCRNL);
+        tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
         tty.c_cc[VMIN]  = 0;
         tty.c_cc[VTIME] = 1;   // 100ms ³¬Ê±
 

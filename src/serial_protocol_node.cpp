@@ -1,50 +1,116 @@
+/**
+ * serial_protocol_node.cpp
+ *
+ * 与 ANO_LX_FC_PRO 飞控 OBC 协议（UART2）对接。
+ *
+ * 帧格式（User_Task.c / OBC_Send_Data / OBC_Recv_Callback）：
+ *   [0xA5][ID][data...][CRC8][0x5B]
+ *   CRC8：多项式 0x31，init 0x00，覆盖 header+ID+data
+ *
+ * ROS → FC（发送）：
+ *   0x00  Unlock/Arm    无数据  4字节
+ *   0x01  Lock/Disarm   无数据  4字节
+ *   0x02  Land          无数据  4字节
+ *   0x06  速度控制       8字节   int16 vel_x/y/z cm/s + yaw_dps
+ *
+ * FC → ROS（接收，50 Hz）：
+ *   0x03  姿态   7字节   rol/pit/yaw ×0.01°, state
+ *   0x04  四元数 9字节   q0-q3 ×0.0001, state
+ *   0x05  高度   9字节   fused/add cm (int32), state
+ *   0x07  速度   6字节   vx/vy/vz cm/s (int16)
+ */
+
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/quaternion_stamped.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/byte_multi_array.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <std_srvs/srv/trigger.hpp>
+
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <atomic>
 #include <sstream>
 #include <iomanip>
-#include <thread>
 #include <chrono>
+#include <cstring>
+#include <cmath>
+
 #include "serial_protocol/serial_port.hpp"
 
-class SerialProtocolNode : public rclcpp::Node {
-public:
-    static constexpr uint8_t CMD_HEARTBEAT = 0x00;
-    static constexpr uint8_t CMD_ARM       = 0x01;
-    static constexpr uint8_t CMD_DISARM    = 0x02;
-    static constexpr uint8_t CMD_VELOCITY  = 0x03;
-    static constexpr uint8_t CMD_HOLD      = 0x04;
-    static constexpr uint8_t CMD_LAND      = 0x05;
-    static constexpr uint8_t CMD_EMERGENCY = 0x06;
-    static constexpr uint8_t CMD_DISPLAY   = 0x07;  // 展示模\BF\E9\C3\FC\C1\EE
+// ─── CRC8 (poly 0x31, init 0x00) ──────────────────────────────────────────
+static uint8_t crc8(const uint8_t* data, size_t len)
+{
+    uint8_t crc = 0x00;
+    while (len--) {
+        crc ^= *data++;
+        for (int i = 0; i < 8; ++i) {
+            if (crc & 0x80) crc = (crc << 1) ^ 0x31;
+            else            crc <<= 1;
+        }
+    }
+    return crc;
+}
 
-    // \D3\C5\CF燃\B6\CA\FD值越\B4\F3\A3\AC\D3\C5\CF燃\B6越\B8\DF
+// ─── 帧构建辅助 ────────────────────────────────────────────────────────────
+/**
+ * 构造一帧并写入 buf（调用方保证 buf 足够大）。
+ * 返回帧总长度：1(head) + 1(id) + data_len + 1(crc) + 1(tail) = data_len + 4
+ */
+static size_t build_frame(uint8_t* buf, uint8_t id,
+                           const uint8_t* data, size_t data_len)
+{
+    buf[0] = 0xA5;
+    buf[1] = id;
+    if (data_len > 0) {
+        memcpy(buf + 2, data, data_len);
+    }
+    // CRC8 覆盖 head + id + data
+    buf[2 + data_len] = crc8(buf, 2 + data_len);
+    buf[3 + data_len] = 0x5B;
+    return 4 + data_len;
+}
+
+// ─── 主节点 ────────────────────────────────────────────────────────────────
+class SerialProtocolNode : public rclcpp::Node
+{
+public:
+    // 发送给飞控的命令 ID（与 FC User_Task.c OBC_Recv_Callback 对齐）
+    static constexpr uint8_t CMD_ARM      = 0x00;   // Unlock
+    static constexpr uint8_t CMD_DISARM   = 0x01;   // Lock
+    static constexpr uint8_t CMD_LAND     = 0x02;   // Land
+    static constexpr uint8_t CMD_VELOCITY = 0x06;   // 速度控制
+    static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // 本地心跳占位，不发送到 FC
+
+    // 飞控发送给我们的遥测 ID（与 FC UserTask_OneKeyCmd 对齐）
+    static constexpr uint8_t FC_ID_ATTITUDE   = 0x03;
+    static constexpr uint8_t FC_ID_QUATERNION = 0x04;
+    static constexpr uint8_t FC_ID_ALTITUDE   = 0x05;
+    static constexpr uint8_t FC_ID_VELOCITY   = 0x07;
+
     enum Priority : int {
         PRIORITY_HEARTBEAT = 0,
         PRIORITY_VELOCITY  = 1,
-        PRIORITY_DISPLAY   = 2,   // \B8\DF\D3\DA\CB俣龋\AC\B5\CD\D3诮\B5\C2\E4
         PRIORITY_LAND      = 3,
         PRIORITY_ARM       = 4,
         PRIORITY_DISARM    = 5,
-        PRIORITY_EMERGENCY = 6
     };
 
     struct ActiveCommand {
-        uint8_t cmd = CMD_HEARTBEAT;
-        float data[4] = {0};
+        uint8_t  cmd      = CMD_HEARTBEAT;
+        int16_t  vel[4]   = {0, 0, 0, 0};   // vx, vy, vz cm/s; yaw dps
         Priority priority = PRIORITY_HEARTBEAT;
-        bool is_one_shot = false;
+        bool     is_one_shot = false;
     };
 
-    SerialProtocolNode()
-    : Node("serial_protocol_node")
+    SerialProtocolNode() : Node("serial_protocol_node")
     {
         this->declare_parameter<std::string>("port", "/dev/ttyS1");
         this->declare_parameter<int>("baud", 115200);
-        this->declare_parameter<double>("send_rate_hz", 20.0);
+        this->declare_parameter<double>("send_rate_hz", 50.0);
         this->declare_parameter<double>("vel_timeout", 0.2);
 
         std::string port = this->get_parameter("port").as_string();
@@ -52,160 +118,145 @@ public:
 
         try {
             serial_ = std::make_unique<SerialPort>(port, baud);
-            RCLCPP_INFO(this->get_logger(), "Serial port %s opened, baudrate %d", port.c_str(), baud);
+            RCLCPP_INFO(get_logger(), "Opened serial port %s @ %d baud", port.c_str(), baud);
         } catch (const std::exception& e) {
-            RCLCPP_FATAL(this->get_logger(), "Serial init error: %s", e.what());
+            RCLCPP_FATAL(get_logger(), "Serial init error: %s", e.what());
             rclcpp::shutdown();
             return;
         }
 
-        vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+        // ── 订阅 ──────────────────────────────────────────────────────────
+        vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10,
             std::bind(&SerialProtocolNode::vel_callback, this, std::placeholders::_1));
 
-        // \D0\C2\D4\F6\A3\BA展示模\BF\E9\CA\FD\BE荻\A9\D4模\AC\BB\B0\CC\E2\C3\FB display_data
-        display_sub_ = this->create_subscription<std_msgs::msg::ByteMultiArray>(
-            "display_data", 10,
-            std::bind(&SerialProtocolNode::display_callback, this, std::placeholders::_1));
+        // ── 服务 ──────────────────────────────────────────────────────────
+        arm_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/arm",
+            std::bind(&SerialProtocolNode::handle_arm, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        disarm_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/disarm",
+            std::bind(&SerialProtocolNode::handle_disarm, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        land_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/land",
+            std::bind(&SerialProtocolNode::handle_land, this,
+                      std::placeholders::_1, std::placeholders::_2));
 
-        arm_srv_ = this->create_service<std_srvs::srv::Trigger>(
-            "~/arm", std::bind(&SerialProtocolNode::handle_arm, this, std::placeholders::_1, std::placeholders::_2));
-        disarm_srv_ = this->create_service<std_srvs::srv::Trigger>(
-            "~/disarm", std::bind(&SerialProtocolNode::handle_disarm, this, std::placeholders::_1, std::placeholders::_2));
-        land_srv_ = this->create_service<std_srvs::srv::Trigger>(
-            "~/land", std::bind(&SerialProtocolNode::handle_land, this, std::placeholders::_1, std::placeholders::_2));
-        emergency_srv_ = this->create_service<std_srvs::srv::Trigger>(
-            "~/emergency", std::bind(&SerialProtocolNode::handle_emergency, this, std::placeholders::_1, std::placeholders::_2));
+        // ── 发布：飞控遥测 ────────────────────────────────────────────────
+        // /fc/attitude:  [roll_deg, pitch_deg, yaw_deg, state]
+        att_pub_  = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/attitude",   10);
+        // /fc/quaternion: [q0, q1, q2, q3, state]
+        quat_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/quaternion", 10);
+        // /fc/altitude:  [fused_cm, add_cm, state]
+        alt_pub_  = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/altitude",   10);
+        // /fc/velocity:  Twist（linear.x/y/z = vx/vy/vz m/s，angular = 0）
+        fc_vel_pub_ = create_publisher<geometry_msgs::msg::Twist>("/fc/velocity",        10);
 
-        double period = 1.0 / this->get_parameter("send_rate_hz").as_double();
-        send_timer_ = this->create_wall_timer(
+        // ── 发送定时器 ────────────────────────────────────────────────────
+        double period = 1.0 / get_parameter("send_rate_hz").as_double();
+        send_timer_ = create_wall_timer(
             std::chrono::duration<double>(period),
             std::bind(&SerialProtocolNode::timer_callback, this));
 
-        last_vel_time_ = this->now();
-        last_display_time_ = this->now();
-        active_cmd_ = ActiveCommand{};
-        has_display_data_ = false;
+        last_vel_time_ = now();
+        active_cmd_    = ActiveCommand{};
+
+        // ── 接收线程 ──────────────────────────────────────────────────────
+        rx_running_ = true;
+        rx_thread_  = std::thread(&SerialProtocolNode::rx_loop, this);
     }
 
-    // \CE\F6\B9\B9\BA\AF\CA\FD\A3\BA\B0\B2全停止\A3\AC\B7\A2\CB\CD\C1\BD\B4\CE\C1\E3\CB俣\C8指\C1\EE
-    ~SerialProtocolNode() {
+    ~SerialProtocolNode()
+    {
+        rx_running_ = false;
+        if (rx_thread_.joinable()) rx_thread_.join();
+
         if (serial_) {
-            RCLCPP_INFO(this->get_logger(), "Shutting down: sending stop commands...");
-            send_command(CMD_VELOCITY, 0.0f, 0.0f, 0.0f, 0.0f);
+            RCLCPP_INFO(get_logger(), "Sending stop velocity before shutdown...");
+            send_velocity(0, 0, 0, 0);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            send_command(CMD_VELOCITY, 0.0f, 0.0f, 0.0f, 0.0f);
-            RCLCPP_INFO(this->get_logger(), "Stop commands sent.");
+            send_velocity(0, 0, 0, 0);
         }
     }
 
 private:
-    void vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        desired_vel_[0] = msg->linear.x;
-        desired_vel_[1] = msg->linear.y;
-        desired_vel_[2] = msg->linear.z;
-        desired_vel_[3] = msg->angular.z;
-        last_vel_time_ = this->now();
+    // ── 回调 ──────────────────────────────────────────────────────────────
 
+    void vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // 单位换算：m/s → cm/s，rad/s → deg/s
+        desired_vel_[0] = static_cast<int16_t>(msg->linear.x  * 100.0);
+        desired_vel_[1] = static_cast<int16_t>(msg->linear.y  * 100.0);
+        desired_vel_[2] = static_cast<int16_t>(msg->linear.z  * 100.0);
+        desired_vel_[3] = static_cast<int16_t>(msg->angular.z * 180.0 / M_PI);
+        last_vel_time_  = now();
         request_command(CMD_VELOCITY, desired_vel_, PRIORITY_VELOCITY, false);
     }
 
-    // \D0\C2\D4\F6\BB氐\F7\A3\BA\BD\D3\CA\D5展示模\BF\E9\CA\FD\BE荩\A816\D7纸冢\A9\A3\AC映\C9\E4为4\B8\F6float
-    void display_callback(const std_msgs::msg::ByteMultiArray::SharedPtr msg) {
-        if (msg->data.size() != 16) {
-            RCLCPP_ERROR(this->get_logger(), "Display data must be 16 bytes, got %zu", msg->data.size());
-            return;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        // \BD\AB\D7纸\DA\CA\FD\BE莞\B4\D6频\BD display_data_
-        memcpy(display_data_, msg->data.data(), 16);
-        last_display_time_ = this->now();
-        has_display_data_ = true;
-        // \C7\EB\C7\F3\B3\D6\D0\F8\B7\A2\CB\CD展示\CA\FD\BE荩\AC\D3\C5\CF燃\B6\B8\DF\D3\DAVELOCITY
-        request_command(CMD_DISPLAY, display_data_, PRIORITY_DISPLAY, false);
-    }
-
     void handle_arm(const std_srvs::srv::Trigger::Request::SharedPtr,
-                    std_srvs::srv::Trigger::Response::SharedPtr res) {
-        float zero[4] = {0};
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            request_command(CMD_ARM, zero, PRIORITY_ARM, true);
-        }
+                    std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        int16_t zero[4] = {0};
+        { std::lock_guard<std::mutex> lock(mutex_); request_command(CMD_ARM, zero, PRIORITY_ARM, true); }
         res->success = true;
-        res->message = "ARM requested";
+        res->message = "ARM (Unlock) requested";
     }
 
     void handle_disarm(const std_srvs::srv::Trigger::Request::SharedPtr,
-                       std_srvs::srv::Trigger::Response::SharedPtr res) {
-        float zero[4] = {0};
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            request_command(CMD_DISARM, zero, PRIORITY_DISARM, true);
-        }
+                       std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        int16_t zero[4] = {0};
+        { std::lock_guard<std::mutex> lock(mutex_); request_command(CMD_DISARM, zero, PRIORITY_DISARM, true); }
         res->success = true;
-        res->message = "DISARM requested";
+        res->message = "DISARM (Lock) requested";
     }
 
     void handle_land(const std_srvs::srv::Trigger::Request::SharedPtr,
-                     std_srvs::srv::Trigger::Response::SharedPtr res) {
-        float zero[4] = {0};
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            request_command(CMD_LAND, zero, PRIORITY_LAND, true);
-        }
+                     std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        int16_t zero[4] = {0};
+        { std::lock_guard<std::mutex> lock(mutex_); request_command(CMD_LAND, zero, PRIORITY_LAND, true); }
         res->success = true;
         res->message = "LAND requested";
     }
 
-    void handle_emergency(const std_srvs::srv::Trigger::Request::SharedPtr,
-                          std_srvs::srv::Trigger::Response::SharedPtr res) {
-        float zero[4] = {0};
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            request_command(CMD_EMERGENCY, zero, PRIORITY_EMERGENCY, true);
-        }
-        res->success = true;
-        res->message = "EMERGENCY STOP requested";
-    }
+    // ── 命令调度（必须持锁调用）──────────────────────────────────────────
 
-    // \B5\F7\D3\C3前\B1\D8\D0\EB\D2殉\D6\D3\D0 mutex_
-    void request_command(uint8_t cmd, const float* data, Priority prio, bool one_shot) {
+    void request_command(uint8_t cmd, const int16_t* vel,
+                         Priority prio, bool one_shot)
+    {
         if (prio >= active_cmd_.priority) {
             active_cmd_.cmd = cmd;
-            std::copy(data, data + 4, active_cmd_.data);
-            active_cmd_.priority = prio;
+            std::copy(vel, vel + 4, active_cmd_.vel);
+            active_cmd_.priority  = prio;
             active_cmd_.is_one_shot = one_shot;
         }
     }
 
-    void timer_callback() {
+    void timer_callback()
+    {
         ActiveCommand cmd_to_send;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            double timeout = this->get_parameter("vel_timeout").as_double();
-            bool vel_active = ((this->now() - last_vel_time_).seconds() < timeout);
-            bool display_active = has_display_data_ && ((this->now() - last_display_time_).seconds() < timeout);
+            double timeout = get_parameter("vel_timeout").as_double();
+            bool vel_active = ((now() - last_vel_time_).seconds() < timeout);
 
-            // \B3\D6\D0\F8\B3\A2\CA\D4\D3\C3\D7\EE\D0碌\C4\CF\D4示\CA\FD\BE莞\FC\D0\C2\C3\FC\C1睿╘D3\C5\CF燃\B6\B1\A3\BB\A4\A3\A9
-            if (display_active) {
-                request_command(CMD_DISPLAY, display_data_, PRIORITY_DISPLAY, false);
-            }
             if (vel_active) {
                 request_command(CMD_VELOCITY, desired_vel_, PRIORITY_VELOCITY, false);
             }
 
-            // \CB俣瘸\AC时\BD\B5\BC\B6\B4\A6\C0\ED\A3\A8\B1\A3\C1\F4原\D3\D0\C1\E3\CB俟\FD\B6\C9\C2呒\AD\A3\A9
+            // 速度超时：发一次零速再回心跳
             if (active_cmd_.cmd == CMD_VELOCITY && !vel_active) {
-                recompute_base_command();
-            }
-            // 展示\CA\FD\BE莩\AC时直\BD咏\B5\BC\B6为\D0\C4\CC\F8
-            if (active_cmd_.cmd == CMD_DISPLAY && !display_active) {
-                // 确\B1\A3\B5\B1前\C3\FC\C1\EE\C8\D4\CA\C7 DISPLAY\A3\A8未\B1\BB\B8\DF\D3\C5\CF燃\B6\B8\B2\B8牵\A9
-                if (active_cmd_.cmd == CMD_DISPLAY) {
-                    active_cmd_.cmd = CMD_HEARTBEAT;
-                    std::fill(active_cmd_.data, active_cmd_.data + 4, 0.0f);
+                bool in_zero_trans = active_cmd_.is_one_shot;
+                if (!in_zero_trans) {
+                    active_cmd_.vel[0] = active_cmd_.vel[1] =
+                    active_cmd_.vel[2] = active_cmd_.vel[3] = 0;
+                    active_cmd_.is_one_shot = true;
+                } else {
+                    active_cmd_.cmd      = CMD_HEARTBEAT;
                     active_cmd_.priority = PRIORITY_HEARTBEAT;
                     active_cmd_.is_one_shot = false;
                 }
@@ -214,9 +265,10 @@ private:
             cmd_to_send = active_cmd_;
         }
 
-        send_command(cmd_to_send.cmd,
-                     cmd_to_send.data[0], cmd_to_send.data[1],
-                     cmd_to_send.data[2], cmd_to_send.data[3]);
+        // 心跳占位不发包到飞控
+        if (cmd_to_send.cmd != CMD_HEARTBEAT) {
+            do_send(cmd_to_send);
+        }
 
         if (cmd_to_send.is_one_shot) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -227,88 +279,293 @@ private:
         }
     }
 
-    void recompute_base_command() {
-        double timeout = this->get_parameter("vel_timeout").as_double();
-        bool vel_active = ((this->now() - last_vel_time_).seconds() < timeout);
-
+    void recompute_base_command()
+    {
+        double timeout   = get_parameter("vel_timeout").as_double();
+        bool vel_active  = ((now() - last_vel_time_).seconds() < timeout);
         if (vel_active) {
-            // \CB俣\C8\CF\FB息\C8\D4\D3\D0效\A3\AC\D5\FD\B3\A3\B7\A2\CB\CD\C6\DA\CD\FB\CB俣\C8
             active_cmd_.cmd = CMD_VELOCITY;
-            std::copy(desired_vel_, desired_vel_ + 4, active_cmd_.data);
-            active_cmd_.priority = PRIORITY_VELOCITY;
+            std::copy(desired_vel_, desired_vel_ + 4, active_cmd_.vel);
+            active_cmd_.priority    = PRIORITY_VELOCITY;
             active_cmd_.is_one_shot = false;
         } else {
-            // \CB俣\C8\D2殉\AC时\A3\AC\BD\B5\BC\B6\B4\A6\C0\ED\A3\BA\CF确\A2\C1\E3\CB侔\FC\D4\D9转\D0\C4\CC\F8
-            // \C5卸系\B1前\CA欠\F1\D2丫\AD\B4\A6\D3凇\B0一\B4\CE\D0\D4\C1\E3\CB俟\FD\B6伞\B1状态
-            bool in_zero_transition = (active_cmd_.cmd == CMD_VELOCITY && active_cmd_.is_one_shot);
-            if (!in_zero_transition) {
-                // \CA状纬\AC时\A3\BA\C9\E8\D6\C3一\B8\F6一\B4\CE\D0\D4\C1\E3\CB\D9\C3\FC\C1睿琝CF麓畏\A2\CB\CD
-                active_cmd_.cmd = CMD_VELOCITY;
-                std::fill(active_cmd_.data, active_cmd_.data + 4, 0.0f);
-                active_cmd_.priority = PRIORITY_VELOCITY;
-                active_cmd_.is_one_shot = true;
-            } else {
-                // \D2丫\AD\B7\A2\CB凸\FD\C1\E3\CB俟\FD\B6砂\FC\A3\AC转为\D0\C4\CC\F8\B0\FC
-                active_cmd_.cmd = CMD_HEARTBEAT;
-                std::fill(active_cmd_.data, active_cmd_.data + 4, 0.0f);
-                active_cmd_.priority = PRIORITY_HEARTBEAT;
-                active_cmd_.is_one_shot = false;
+            active_cmd_.cmd      = CMD_HEARTBEAT;
+            active_cmd_.vel[0]   = active_cmd_.vel[1] =
+            active_cmd_.vel[2]   = active_cmd_.vel[3] = 0;
+            active_cmd_.priority = PRIORITY_HEARTBEAT;
+            active_cmd_.is_one_shot = false;
+        }
+    }
+
+    // ── 发送 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 按飞控 OBC 协议发送命令帧。
+     * 无数据命令（ARM/DISARM/LAND）：总长 4 字节
+     * 速度命令（0x06）：数据 8 字节 = 4×int16_t LE，总长 12 字节
+     */
+    void do_send(const ActiveCommand& cmd)
+    {
+        if (!serial_) return;
+
+        uint8_t buf[16];
+        size_t  frame_len = 0;
+
+        switch (cmd.cmd) {
+        case CMD_ARM:
+        case CMD_DISARM:
+        case CMD_LAND:
+            frame_len = build_frame(buf, cmd.cmd, nullptr, 0);
+            break;
+
+        case CMD_VELOCITY: {
+            uint8_t data[8];
+            // int16_t little-endian: vel_x, vel_y, vel_z cm/s; yaw_dps
+            for (int i = 0; i < 4; ++i) {
+                data[i * 2]     = static_cast<uint8_t>(cmd.vel[i] & 0xFF);
+                data[i * 2 + 1] = static_cast<uint8_t>((cmd.vel[i] >> 8) & 0xFF);
+            }
+            frame_len = build_frame(buf, CMD_VELOCITY, data, 8);
+            break;
+        }
+        default:
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "TX[" << frame_len << "]: ";
+        for (size_t i = 0; i < frame_len; ++i)
+            oss << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+                << static_cast<int>(buf[i]) << ' ';
+        RCLCPP_DEBUG(get_logger(), "%s", oss.str().c_str());
+
+        if (!serial_->write(buf, frame_len)) {
+            RCLCPP_ERROR(get_logger(), "Serial write failed");
+        }
+    }
+
+    /** 便捷封装：直接发速度帧（析构时用）*/
+    void send_velocity(int16_t vx, int16_t vy, int16_t vz, int16_t yaw_dps)
+    {
+        ActiveCommand cmd;
+        cmd.cmd    = CMD_VELOCITY;
+        cmd.vel[0] = vx; cmd.vel[1] = vy;
+        cmd.vel[2] = vz; cmd.vel[3] = yaw_dps;
+        do_send(cmd);
+    }
+
+    // ── 接收线程 ──────────────────────────────────────────────────────────
+
+    /**
+     * 飞控 OBC 帧接收状态机（对应 User_Task.c OBC_Recv_Callback 逻辑镜像）。
+     * 帧格式：[0xA5][ID][data...][CRC8][0x5B]
+     * 遥测帧长：
+     *   0x03 attitude:   7 data bytes → 总 11 B
+     *   0x04 quaternion: 9 data bytes → 总 13 B
+     *   0x05 altitude:   9 data bytes → 总 13 B
+     *   0x07 velocity:   6 data bytes → 总 10 B
+     */
+    void rx_loop()
+    {
+        // 接收缓冲（足够容纳最长帧）
+        static constexpr size_t BUF_MAX = 64;
+        uint8_t raw[BUF_MAX];
+
+        enum class RxState { WAIT_HEAD, WAIT_ID, RECV_DATA, WAIT_CRC, WAIT_TAIL };
+
+        RxState state    = RxState::WAIT_HEAD;
+        uint8_t frame[BUF_MAX];
+        size_t  frame_len = 0;   // 已收入 frame[] 的字节数（head+id+data）
+        size_t  data_expect = 0; // 当前帧 data 段字节数
+
+        while (rx_running_) {
+            int n = serial_->read(raw, sizeof(raw));
+            if (n <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            for (int i = 0; i < n; ++i) {
+                uint8_t b = raw[i];
+                switch (state) {
+                case RxState::WAIT_HEAD:
+                    if (b == 0xA5) {
+                        frame[0] = b;
+                        frame_len = 1;
+                        state = RxState::WAIT_ID;
+                    }
+                    break;
+
+                case RxState::WAIT_ID:
+                    frame[1]  = b;
+                    frame_len = 2;
+                    // 根据 ID 确定数据段长度
+                    switch (b) {
+                    case FC_ID_ATTITUDE:   data_expect = 7; break;
+                    case FC_ID_QUATERNION: data_expect = 9; break;
+                    case FC_ID_ALTITUDE:   data_expect = 9; break;
+                    case FC_ID_VELOCITY:   data_expect = 6; break;
+                    default:
+                        // 未知 ID，放弃此帧
+                        state = RxState::WAIT_HEAD;
+                        continue;
+                    }
+                    state = (data_expect > 0) ? RxState::RECV_DATA : RxState::WAIT_CRC;
+                    break;
+
+                case RxState::RECV_DATA:
+                    if (frame_len < BUF_MAX) frame[frame_len++] = b;
+                    // 已收 head(1)+id(1)+data(data_expect)
+                    if (frame_len == 2 + data_expect) {
+                        state = RxState::WAIT_CRC;
+                    }
+                    break;
+
+                case RxState::WAIT_CRC: {
+                    uint8_t expected = crc8(frame, frame_len);
+                    if (b == expected) {
+                        state = RxState::WAIT_TAIL;
+                    } else {
+                        RCLCPP_WARN(get_logger(),
+                            "CRC8 mismatch for ID 0x%02X: got 0x%02X expected 0x%02X",
+                            frame[1], b, expected);
+                        state = RxState::WAIT_HEAD;
+                    }
+                    break;
+                }
+
+                case RxState::WAIT_TAIL:
+                    if (b == 0x5B) {
+                        dispatch_rx_frame(frame[1], frame + 2, data_expect);
+                    } else {
+                        RCLCPP_WARN(get_logger(), "Missing tail 0x5B for ID 0x%02X", frame[1]);
+                    }
+                    state = RxState::WAIT_HEAD;
+                    break;
+                }
             }
         }
     }
 
-    void send_command(uint8_t cmd, float v1, float v2, float v3, float v4) {
-        if (!serial_) return;
+    /**
+     * 解析并发布飞控遥测帧。
+     * 所有数值均为小端序。
+     */
+    void dispatch_rx_frame(uint8_t id, const uint8_t* data, size_t len)
+    {
+        switch (id) {
+        case FC_ID_ATTITUDE: {
+            // 7字节：rol/pit/yaw int16 ×0.01°；state uint8
+            if (len < 7) break;
+            int16_t rol_raw, pit_raw, yaw_raw;
+            memcpy(&rol_raw, data + 0, 2);
+            memcpy(&pit_raw, data + 2, 2);
+            memcpy(&yaw_raw, data + 4, 2);
+            uint8_t state = data[6];
 
-        uint8_t packet[20];
-        packet[0] = 0xA5;
-        packet[1] = cmd;
-
-        float data[4] = {v1, v2, v3, v4};
-        memcpy(packet + 2, data, 16);
-
-        uint8_t checksum = 0;
-        for (int i = 0; i < 18; i++) {
-            checksum ^= packet[i];
+            auto msg = std_msgs::msg::Float32MultiArray();
+            msg.data = {
+                rol_raw * 0.01f,
+                pit_raw * 0.01f,
+                yaw_raw * 0.01f,
+                static_cast<float>(state)
+            };
+            att_pub_->publish(msg);
+            RCLCPP_DEBUG(get_logger(), "ATT roll=%.2f pit=%.2f yaw=%.2f state=%u",
+                         msg.data[0], msg.data[1], msg.data[2], state);
+            break;
         }
-        packet[18] = checksum;
-        packet[19] = 0x5B;
 
-        std::ostringstream oss;
-        oss << "Sending packet: ";
-        for (int i = 0; i < 20; ++i) {
-            oss << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
-                << static_cast<int>(packet[i]) << " ";
+        case FC_ID_QUATERNION: {
+            // 9字节：q0-q3 int16 ×0.0001；state uint8
+            if (len < 9) break;
+            int16_t q[4];
+            for (int i = 0; i < 4; ++i) memcpy(&q[i], data + i * 2, 2);
+            uint8_t state = data[8];
+
+            auto msg = std_msgs::msg::Float32MultiArray();
+            msg.data = {
+                q[0] * 1e-4f, q[1] * 1e-4f,
+                q[2] * 1e-4f, q[3] * 1e-4f,
+                static_cast<float>(state)
+            };
+            quat_pub_->publish(msg);
+            break;
         }
-        RCLCPP_INFO(this->get_logger(), "%s", oss.str().c_str());
 
-        if (!serial_->write(packet, 20)) {
-            RCLCPP_ERROR(this->get_logger(), "Serial write failed");
+        case FC_ID_ALTITUDE: {
+            // 9字节：fused int32 cm，add int32 cm；state uint8
+            if (len < 9) break;
+            int32_t fused, add;
+            memcpy(&fused, data + 0, 4);
+            memcpy(&add,   data + 4, 4);
+            uint8_t state = data[8];
+
+            auto msg = std_msgs::msg::Float32MultiArray();
+            msg.data = {
+                static_cast<float>(fused),
+                static_cast<float>(add),
+                static_cast<float>(state)
+            };
+            alt_pub_->publish(msg);
+            RCLCPP_DEBUG(get_logger(), "ALT fused=%d add=%d state=%u", fused, add, state);
+            break;
+        }
+
+        case FC_ID_VELOCITY: {
+            // 6字节：vx/vy/vz int16 cm/s
+            if (len < 6) break;
+            int16_t vx, vy, vz;
+            memcpy(&vx, data + 0, 2);
+            memcpy(&vy, data + 2, 2);
+            memcpy(&vz, data + 4, 2);
+
+            auto msg = geometry_msgs::msg::Twist();
+            msg.linear.x = vx * 0.01;
+            msg.linear.y = vy * 0.01;
+            msg.linear.z = vz * 0.01;
+            fc_vel_pub_->publish(msg);
+            break;
+        }
+
+        default:
+            break;
         }
     }
 
+    // ── 成员变量 ──────────────────────────────────────────────────────────
+
     std::unique_ptr<SerialPort> serial_;
 
+    // 订阅
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr vel_sub_;
-    rclcpp::Subscription<std_msgs::msg::ByteMultiArray>::SharedPtr display_sub_; // \D0\C2\D4\F6
+
+    // 服务
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disarm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr land_srv_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr emergency_srv_;
+
+    // 发布（飞控遥测）
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr att_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr quat_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr alt_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr        fc_vel_pub_;
 
     rclcpp::TimerBase::SharedPtr send_timer_;
 
     std::mutex mutex_;
-    float desired_vel_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float display_data_[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // 展示\CA\FD\BE\DD
+    int16_t    desired_vel_[4]  = {0, 0, 0, 0};
     rclcpp::Time last_vel_time_;
-    rclcpp::Time last_display_time_;                   // \C9洗\CE\CA盏\BD展示\CA\FD\BE莸\C4时\BC\E4
-    bool has_display_data_ = false;
 
     ActiveCommand active_cmd_;
+
+    std::thread       rx_thread_;
+    std::atomic<bool> rx_running_{false};
 };
 
-int main(int argc, char** argv) {
+// ─── main ──────────────────────────────────────────────────────────────────
+int main(int argc, char** argv)
+{
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<SerialProtocolNode>());
     rclcpp::shutdown();
