@@ -1,28 +1,29 @@
 /**
  * serial_protocol_node.cpp
  *
- * Óë ANO_LX_FC_PRO ·É¿Ø OBC Ð­Òé£¨UART2£©¶Ô½Ó¡£
+ * ï¿½ï¿½ ANO_LX_FC_PRO ï¿½É¿ï¿½ OBC Ð­ï¿½é£¨UART2ï¿½ï¿½ï¿½Ô½Ó¡ï¿½
  *
- * Ö¡¸ñÊ½£¨User_Task.c / OBC_Send_Data / OBC_Recv_Callback£©£º
+ * Ö¡ï¿½ï¿½Ê½ï¿½ï¿½User_Task.c / OBC_Send_Data / OBC_Recv_Callbackï¿½ï¿½ï¿½ï¿½
  *   [0xA5][ID][data...][CRC8][0x5B]
- *   CRC8£º¶àÏîÊ½ 0x31£¬init 0x00£¬¸²¸Ç header+ID+data
+ *   CRC8ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½ 0x31ï¿½ï¿½init 0x00ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ header+ID+data
  *
- * ROS ¡ú FC£¨·¢ËÍ£©£º
- *   0x00  Unlock/Arm    ÎÞÊý¾Ý  4×Ö½Ú
- *   0x01  Lock/Disarm   ÎÞÊý¾Ý  4×Ö½Ú
- *   0x02  Land          ÎÞÊý¾Ý  4×Ö½Ú
- *   0x06  ËÙ¶È¿ØÖÆ       8×Ö½Ú   int16 vel_x/y/z cm/s + yaw_dps
+ * ROS ï¿½ï¿½ FCï¿½ï¿½ï¿½ï¿½ï¿½Í£ï¿½ï¿½ï¿½
+ *   0x00  Unlock/Arm    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½  4ï¿½Ö½ï¿½
+ *   0x01  Lock/Disarm   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½  4ï¿½Ö½ï¿½
+ *   0x02  Land          ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½  4ï¿½Ö½ï¿½
+ *   0x06  ï¿½Ù¶È¿ï¿½ï¿½ï¿½       8ï¿½Ö½ï¿½   int16 vel_x/y/z cm/s + yaw_dps
  *
- * FC ¡ú ROS£¨½ÓÊÕ£¬50 Hz£©£º
- *   0x03  ×ËÌ¬   7×Ö½Ú   rol/pit/yaw ¡Á0.01¡ã, state
- *   0x04  ËÄÔªÊý 9×Ö½Ú   q0-q3 ¡Á0.0001, state
- *   0x05  ¸ß¶È   9×Ö½Ú   fused/add cm (int32), state
- *   0x07  ËÙ¶È   6×Ö½Ú   vx/vy/vz cm/s (int16)
+ * FC ï¿½ï¿½ ROSï¿½ï¿½ï¿½ï¿½ï¿½Õ£ï¿½50 Hzï¿½ï¿½ï¿½ï¿½
+ *   0x03  ï¿½ï¿½Ì¬   7ï¿½Ö½ï¿½   rol/pit/yaw ï¿½ï¿½0.01ï¿½ï¿½, state
+ *   0x04  ï¿½ï¿½Ôªï¿½ï¿½ 9ï¿½Ö½ï¿½   q0-q3 ï¿½ï¿½0.0001, state
+ *   0x05  ï¿½ß¶ï¿½   9ï¿½Ö½ï¿½   fused/add cm (int32), state
+ *   0x07  ï¿½Ù¶ï¿½   6ï¿½Ö½ï¿½   vx/vy/vz cm/s (int16)
  */
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion_stamped.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/byte_multi_array.hpp>
@@ -41,7 +42,7 @@
 
 #include "serial_protocol/serial_port.hpp"
 
-// ©¤©¤©¤ CRC8 (poly 0x31, init 0x00) ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ CRC8 (poly 0x31, init 0x00) ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 static uint8_t crc8(const uint8_t* data, size_t len)
 {
     uint8_t crc = 0x00;
@@ -55,10 +56,10 @@ static uint8_t crc8(const uint8_t* data, size_t len)
     return crc;
 }
 
-// ©¤©¤©¤ Ö¡¹¹½¨¸¨Öú ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
- * ¹¹ÔìÒ»Ö¡²¢Ð´Èë buf£¨µ÷ÓÃ·½±£Ö¤ buf ×ã¹»´ó£©¡£
- * ·µ»ØÖ¡×Ü³¤¶È£º1(head) + 1(id) + data_len + 1(crc) + 1(tail) = data_len + 4
+ * ï¿½ï¿½ï¿½ï¿½Ò»Ö¡ï¿½ï¿½Ð´ï¿½ï¿½ bufï¿½ï¿½ï¿½ï¿½ï¿½Ã·ï¿½ï¿½ï¿½Ö¤ buf ï¿½ã¹»ï¿½ó£©¡ï¿½
+ * ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½Ü³ï¿½ï¿½È£ï¿½1(head) + 1(id) + data_len + 1(crc) + 1(tail) = data_len + 4
  */
 static size_t build_frame(uint8_t* buf, uint8_t id,
                            const uint8_t* data, size_t data_len)
@@ -68,24 +69,24 @@ static size_t build_frame(uint8_t* buf, uint8_t id,
     if (data_len > 0) {
         memcpy(buf + 2, data, data_len);
     }
-    // CRC8 ¸²¸Ç head + id + data
+    // CRC8 ï¿½ï¿½ï¿½ï¿½ head + id + data
     buf[2 + data_len] = crc8(buf, 2 + data_len);
     buf[3 + data_len] = 0x5B;
     return 4 + data_len;
 }
 
-// ©¤©¤©¤ Ö÷½Úµã ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Úµï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 class SerialProtocolNode : public rclcpp::Node
 {
 public:
-    // ·¢ËÍ¸ø·É¿ØµÄÃüÁî ID£¨Óë FC User_Task.c OBC_Recv_Callback ¶ÔÆë£©
+    // ï¿½ï¿½ï¿½Í¸ï¿½ï¿½É¿Øµï¿½ï¿½ï¿½ï¿½ï¿½ IDï¿½ï¿½ï¿½ï¿½ FC User_Task.c OBC_Recv_Callback ï¿½ï¿½ï¿½ë£©
     static constexpr uint8_t CMD_ARM      = 0x00;   // Unlock
     static constexpr uint8_t CMD_DISARM   = 0x01;   // Lock
     static constexpr uint8_t CMD_LAND     = 0x02;   // Land
-    static constexpr uint8_t CMD_VELOCITY = 0x06;   // ËÙ¶È¿ØÖÆ
-    static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // ±¾µØÐÄÌøÕ¼Î»£¬²»·¢ËÍµ½ FC
+    static constexpr uint8_t CMD_VELOCITY = 0x06;   // ï¿½Ù¶È¿ï¿½ï¿½ï¿½
+    static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Õ¼Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Íµï¿½ FC
 
-    // ·É¿Ø·¢ËÍ¸øÎÒÃÇµÄÒ£²â ID£¨Óë FC UserTask_OneKeyCmd ¶ÔÆë£©
+    // ï¿½É¿Ø·ï¿½ï¿½Í¸ï¿½ï¿½ï¿½ï¿½Çµï¿½Ò£ï¿½ï¿½ IDï¿½ï¿½ï¿½ï¿½ FC UserTask_OneKeyCmd ï¿½ï¿½ï¿½ë£©
     static constexpr uint8_t FC_ID_ATTITUDE   = 0x03;
     static constexpr uint8_t FC_ID_QUATERNION = 0x04;
     static constexpr uint8_t FC_ID_ALTITUDE   = 0x05;
@@ -125,12 +126,12 @@ public:
             return;
         }
 
-        // ©¤©¤ ¶©ÔÄ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10,
             std::bind(&SerialProtocolNode::vel_callback, this, std::placeholders::_1));
 
-        // ©¤©¤ ·þÎñ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         arm_srv_ = create_service<std_srvs::srv::Trigger>(
             "~/arm",
             std::bind(&SerialProtocolNode::handle_arm, this,
@@ -144,17 +145,19 @@ public:
             std::bind(&SerialProtocolNode::handle_land, this,
                       std::placeholders::_1, std::placeholders::_2));
 
-        // ©¤©¤ ·¢²¼£º·É¿ØÒ£²â ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¿ï¿½Ò£ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         // /fc/attitude:  [roll_deg, pitch_deg, yaw_deg, state]
         att_pub_  = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/attitude",   10);
         // /fc/quaternion: [q0, q1, q2, q3, state]
         quat_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/quaternion", 10);
         // /fc/altitude:  [fused_cm, add_cm, state]
         alt_pub_  = create_publisher<std_msgs::msg::Float32MultiArray>("/fc/altitude",   10);
-        // /fc/velocity:  Twist£¨linear.x/y/z = vx/vy/vz m/s£¬angular = 0£©
+        // /fc/velocity:  Twistï¿½ï¿½linear.x/y/z = vx/vy/vz m/sï¿½ï¿½angular = 0ï¿½ï¿½
         fc_vel_pub_ = create_publisher<geometry_msgs::msg::Twist>("/fc/velocity",        10);
+        fc_vel_stamped_pub_ = create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>(
+            "/fc/velocity_stamped", 10);
 
-        // ©¤©¤ ·¢ËÍ¶¨Ê±Æ÷ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Í¶ï¿½Ê±ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         double period = 1.0 / get_parameter("send_rate_hz").as_double();
         send_timer_ = create_wall_timer(
             std::chrono::duration<double>(period),
@@ -163,7 +166,7 @@ public:
         last_vel_time_ = now();
         active_cmd_    = ActiveCommand{};
 
-        // ©¤©¤ ½ÓÊÕÏß³Ì ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+        // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         rx_running_ = true;
         rx_thread_  = std::thread(&SerialProtocolNode::rx_loop, this);
     }
@@ -182,12 +185,12 @@ public:
     }
 
 private:
-    // ©¤©¤ »Øµ÷ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½Øµï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     void vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        // µ¥Î»»»Ëã£ºm/s ¡ú cm/s£¬rad/s ¡ú deg/s
+        // ï¿½ï¿½Î»ï¿½ï¿½ï¿½ã£ºm/s ï¿½ï¿½ cm/sï¿½ï¿½rad/s ï¿½ï¿½ deg/s
         desired_vel_[0] = static_cast<int16_t>(msg->linear.x  * 100.0);
         desired_vel_[1] = static_cast<int16_t>(msg->linear.y  * 100.0);
         desired_vel_[2] = static_cast<int16_t>(msg->linear.z  * 100.0);
@@ -223,7 +226,7 @@ private:
         res->message = "LAND requested";
     }
 
-    // ©¤©¤ ÃüÁîµ÷¶È£¨±ØÐë³ÖËøµ÷ÓÃ£©©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     void request_command(uint8_t cmd, const int16_t* vel,
                          Priority prio, bool one_shot)
@@ -248,7 +251,7 @@ private:
                 request_command(CMD_VELOCITY, desired_vel_, PRIORITY_VELOCITY, false);
             }
 
-            // ËÙ¶È³¬Ê±£º·¢Ò»´ÎÁãËÙÔÙ»ØÐÄÌø
+            // ï¿½Ù¶È³ï¿½Ê±ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ù»ï¿½ï¿½ï¿½ï¿½ï¿½
             if (active_cmd_.cmd == CMD_VELOCITY && !vel_active) {
                 bool in_zero_trans = active_cmd_.is_one_shot;
                 if (!in_zero_trans) {
@@ -265,7 +268,7 @@ private:
             cmd_to_send = active_cmd_;
         }
 
-        // ÐÄÌøÕ¼Î»²»·¢°üµ½·É¿Ø
+        // ï¿½ï¿½ï¿½ï¿½Õ¼Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¿ï¿½
         if (cmd_to_send.cmd != CMD_HEARTBEAT) {
             do_send(cmd_to_send);
         }
@@ -297,12 +300,12 @@ private:
         }
     }
 
-    // ©¤©¤ ·¢ËÍ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     /**
-     * °´·É¿Ø OBC Ð­Òé·¢ËÍÃüÁîÖ¡¡£
-     * ÎÞÊý¾ÝÃüÁî£¨ARM/DISARM/LAND£©£º×Ü³¤ 4 ×Ö½Ú
-     * ËÙ¶ÈÃüÁî£¨0x06£©£ºÊý¾Ý 8 ×Ö½Ú = 4¡Áint16_t LE£¬×Ü³¤ 12 ×Ö½Ú
+     * ï¿½ï¿½ï¿½É¿ï¿½ OBC Ð­ï¿½é·¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¡ï¿½ï¿½
+     * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½î£¨ARM/DISARM/LANDï¿½ï¿½ï¿½ï¿½ï¿½Ü³ï¿½ 4 ï¿½Ö½ï¿½
+     * ï¿½Ù¶ï¿½ï¿½ï¿½ï¿½î£¨0x06ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 8 ï¿½Ö½ï¿½ = 4ï¿½ï¿½int16_t LEï¿½ï¿½ï¿½Ü³ï¿½ 12 ï¿½Ö½ï¿½
      */
     void do_send(const ActiveCommand& cmd)
     {
@@ -344,7 +347,7 @@ private:
         }
     }
 
-    /** ±ã½Ý·â×°£ºÖ±½Ó·¢ËÙ¶ÈÖ¡£¨Îö¹¹Ê±ÓÃ£©*/
+    /** ï¿½ï¿½Ý·ï¿½×°ï¿½ï¿½Ö±ï¿½Ó·ï¿½ï¿½Ù¶ï¿½Ö¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Ã£ï¿?*/
     void send_velocity(int16_t vx, int16_t vy, int16_t vz, int16_t yaw_dps)
     {
         ActiveCommand cmd;
@@ -354,20 +357,20 @@ private:
         do_send(cmd);
     }
 
-    // ©¤©¤ ½ÓÊÕÏß³Ì ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     /**
-     * ·É¿Ø OBC Ö¡½ÓÊÕ×´Ì¬»ú£¨¶ÔÓ¦ User_Task.c OBC_Recv_Callback Âß¼­¾µÏñ£©¡£
-     * Ö¡¸ñÊ½£º[0xA5][ID][data...][CRC8][0x5B]
-     * Ò£²âÖ¡³¤£º
-     *   0x03 attitude:   7 data bytes ¡ú ×Ü 11 B
-     *   0x04 quaternion: 9 data bytes ¡ú ×Ü 13 B
-     *   0x05 altitude:   9 data bytes ¡ú ×Ü 13 B
-     *   0x07 velocity:   6 data bytes ¡ú ×Ü 10 B
+     * ï¿½É¿ï¿½ OBC Ö¡ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ User_Task.c OBC_Recv_Callback ï¿½ß¼ï¿½ï¿½ï¿½ï¿½ñ£©¡ï¿½
+     * Ö¡ï¿½ï¿½Ê½ï¿½ï¿½[0xA5][ID][data...][CRC8][0x5B]
+     * Ò£ï¿½ï¿½Ö¡ï¿½ï¿½ï¿½ï¿½
+     *   0x03 attitude:   7 data bytes ï¿½ï¿½ ï¿½ï¿½ 11 B
+     *   0x04 quaternion: 9 data bytes ï¿½ï¿½ ï¿½ï¿½ 13 B
+     *   0x05 altitude:   9 data bytes ï¿½ï¿½ ï¿½ï¿½ 13 B
+     *   0x07 velocity:   6 data bytes ï¿½ï¿½ ï¿½ï¿½ 10 B
      */
     void rx_loop()
     {
-        // ½ÓÊÕ»º³å£¨×ã¹»ÈÝÄÉ×î³¤Ö¡£©
+        // ï¿½ï¿½ï¿½Õ»ï¿½ï¿½å£¨ï¿½ã¹»ï¿½ï¿½ï¿½ï¿½ï¿½î³¤Ö¡ï¿½ï¿½
         static constexpr size_t BUF_MAX = 64;
         uint8_t raw[BUF_MAX];
 
@@ -375,8 +378,8 @@ private:
 
         RxState state    = RxState::WAIT_HEAD;
         uint8_t frame[BUF_MAX];
-        size_t  frame_len = 0;   // ÒÑÊÕÈë frame[] µÄ×Ö½ÚÊý£¨head+id+data£©
-        size_t  data_expect = 0; // µ±Ç°Ö¡ data ¶Î×Ö½ÚÊý
+        size_t  frame_len = 0;   // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ frame[] ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½ï¿½ï¿½head+id+dataï¿½ï¿½
+        size_t  data_expect = 0; // ï¿½ï¿½Ç°Ö¡ data ï¿½ï¿½ï¿½Ö½ï¿½ï¿½ï¿½
 
         while (rx_running_) {
             int n = serial_->read(raw, sizeof(raw));
@@ -399,14 +402,14 @@ private:
                 case RxState::WAIT_ID:
                     frame[1]  = b;
                     frame_len = 2;
-                    // ¸ù¾Ý ID È·¶¨Êý¾Ý¶Î³¤¶È
+                    // ï¿½ï¿½ï¿½ï¿½ ID È·ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶Î³ï¿½ï¿½ï¿½
                     switch (b) {
                     case FC_ID_ATTITUDE:   data_expect = 7; break;
                     case FC_ID_QUATERNION: data_expect = 9; break;
                     case FC_ID_ALTITUDE:   data_expect = 9; break;
                     case FC_ID_VELOCITY:   data_expect = 6; break;
                     default:
-                        // Î´Öª ID£¬·ÅÆú´ËÖ¡
+                        // Î´Öª IDï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¡
                         state = RxState::WAIT_HEAD;
                         continue;
                     }
@@ -415,7 +418,7 @@ private:
 
                 case RxState::RECV_DATA:
                     if (frame_len < BUF_MAX) frame[frame_len++] = b;
-                    // ÒÑÊÕ head(1)+id(1)+data(data_expect)
+                    // ï¿½ï¿½ï¿½ï¿½ head(1)+id(1)+data(data_expect)
                     if (frame_len == 2 + data_expect) {
                         state = RxState::WAIT_CRC;
                     }
@@ -448,14 +451,14 @@ private:
     }
 
     /**
-     * ½âÎö²¢·¢²¼·É¿ØÒ£²âÖ¡¡£
-     * ËùÓÐÊýÖµ¾ùÎªÐ¡¶ËÐò¡£
+     * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¿ï¿½Ò£ï¿½ï¿½Ö¡ï¿½ï¿½
+     * ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµï¿½ï¿½ÎªÐ¡ï¿½ï¿½ï¿½ï¿½
      */
     void dispatch_rx_frame(uint8_t id, const uint8_t* data, size_t len)
     {
         switch (id) {
         case FC_ID_ATTITUDE: {
-            // 7×Ö½Ú£ºrol/pit/yaw int16 ¡Á0.01¡ã£»state uint8
+            // 7ï¿½Ö½Ú£ï¿½rol/pit/yaw int16 ï¿½ï¿½0.01ï¿½ã£»state uint8
             if (len < 7) break;
             int16_t rol_raw, pit_raw, yaw_raw;
             memcpy(&rol_raw, data + 0, 2);
@@ -477,7 +480,7 @@ private:
         }
 
         case FC_ID_QUATERNION: {
-            // 9×Ö½Ú£ºq0-q3 int16 ¡Á0.0001£»state uint8
+            // 9ï¿½Ö½Ú£ï¿½q0-q3 int16 ï¿½ï¿½0.0001ï¿½ï¿½state uint8
             if (len < 9) break;
             int16_t q[4];
             for (int i = 0; i < 4; ++i) memcpy(&q[i], data + i * 2, 2);
@@ -494,7 +497,7 @@ private:
         }
 
         case FC_ID_ALTITUDE: {
-            // 9×Ö½Ú£ºfused int32 cm£¬add int32 cm£»state uint8
+            // 9ï¿½Ö½Ú£ï¿½fused int32 cmï¿½ï¿½add int32 cmï¿½ï¿½state uint8
             if (len < 9) break;
             int32_t fused, add;
             memcpy(&fused, data + 0, 4);
@@ -513,7 +516,7 @@ private:
         }
 
         case FC_ID_VELOCITY: {
-            // 6×Ö½Ú£ºvx/vy/vz int16 cm/s
+            // 6ï¿½Ö½Ú£ï¿½vx/vy/vz int16 cm/s
             if (len < 6) break;
             int16_t vx, vy, vz;
             memcpy(&vx, data + 0, 2);
@@ -525,6 +528,18 @@ private:
             msg.linear.y = vy * 0.01;
             msg.linear.z = vz * 0.01;
             fc_vel_pub_->publish(msg);
+
+            auto stamped_msg = geometry_msgs::msg::TwistWithCovarianceStamped();
+            stamped_msg.header.stamp = now();
+            stamped_msg.header.frame_id = "body";
+            stamped_msg.twist.twist = msg;
+            stamped_msg.twist.covariance[0] = 0.05;
+            stamped_msg.twist.covariance[7] = 0.05;
+            stamped_msg.twist.covariance[14] = 0.08;
+            stamped_msg.twist.covariance[21] = 99999.0;
+            stamped_msg.twist.covariance[28] = 99999.0;
+            stamped_msg.twist.covariance[35] = 99999.0;
+            fc_vel_stamped_pub_->publish(stamped_msg);
             break;
         }
 
@@ -533,23 +548,24 @@ private:
         }
     }
 
-    // ©¤©¤ ³ÉÔ±±äÁ¿ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½Ô±ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     std::unique_ptr<SerialPort> serial_;
 
-    // ¶©ÔÄ
+    // ï¿½ï¿½ï¿½ï¿½
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr vel_sub_;
 
-    // ·þÎñ
+    // ï¿½ï¿½ï¿½ï¿½
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disarm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr land_srv_;
 
-    // ·¢²¼£¨·É¿ØÒ£²â£©
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¿ï¿½Ò£ï¿½â£©
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr att_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr quat_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr alt_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr        fc_vel_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr fc_vel_stamped_pub_;
 
     rclcpp::TimerBase::SharedPtr send_timer_;
 
@@ -563,7 +579,7 @@ private:
     std::atomic<bool> rx_running_{false};
 };
 
-// ©¤©¤©¤ main ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ main ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);

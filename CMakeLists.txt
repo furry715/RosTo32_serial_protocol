@@ -8,6 +8,10 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(quadrotor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 # ??????????
 include_directories(include)
@@ -18,6 +22,9 @@ add_executable(serial_protocol_node
 )
 add_executable(error_protect
     src/error_protect.cpp
+)
+add_executable(ego_tracker_node
+    src/ego_tracker_node.cpp
 )
 
 # ????????
@@ -32,6 +39,15 @@ ament_target_dependencies(error_protect
     std_srvs
     nav_msgs
 )
+ament_target_dependencies(ego_tracker_node
+    rclcpp
+    geometry_msgs
+    nav_msgs
+    quadrotor_msgs
+    tf2
+    tf2_geometry_msgs
+    visualization_msgs
+)
 
 # ???????????
 install(TARGETS
@@ -42,10 +58,20 @@ install(TARGETS
     error_protect
     DESTINATION lib/${PROJECT_NAME}
 )
+install(TARGETS
+    ego_tracker_node
+    DESTINATION lib/${PROJECT_NAME}
+)
 
 # ????????????????????
 install(DIRECTORY include/
     DESTINATION include
+)
+install(DIRECTORY launch/
+    DESTINATION share/${PROJECT_NAME}
+)
+install(DIRECTORY rviz/
+    DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()
