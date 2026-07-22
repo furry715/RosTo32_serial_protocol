@@ -33,10 +33,15 @@ def include_launch(
 
 
 def generate_launch_description():
+    package_path = get_package_share_directory("serial_protocol")
+    default_mission_file = os.path.join(
+        package_path, "config", "mission_example.yaml")
+
     use_livox = LaunchConfiguration("use_livox")
     use_fast_lio = LaunchConfiguration("use_fast_lio")
     use_ekf = LaunchConfiguration("use_ekf")
     use_ego = LaunchConfiguration("use_ego")
+    use_mission = LaunchConfiguration("use_mission")
     use_serial = LaunchConfiguration("use_serial")
     rviz = LaunchConfiguration("rviz")
 
@@ -51,6 +56,7 @@ def generate_launch_description():
     fast_lio_config_file = LaunchConfiguration("fast_lio_config_file")
     goal_yaw_mode = LaunchConfiguration("goal_yaw_mode")
     yaw_done_deg = LaunchConfiguration("yaw_done_deg")
+    mission_file = LaunchConfiguration("mission_file")
 
     livox_launch = include_launch(
         "livox_ros_driver2",
@@ -90,6 +96,17 @@ def generate_launch_description():
         launch_dir=".",
     )
 
+    mission_launch = include_launch(
+        "serial_protocol",
+        "mission.launch.py",
+        {
+            "mission_file": mission_file,
+            "auto_start": "true",
+        },
+        condition=IfCondition(use_mission),
+        launch_dir=".",
+    )
+
     serial_node = Node(
         package="serial_protocol",
         executable="serial_protocol_node",
@@ -109,6 +126,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_fast_lio", default_value="true"),
         DeclareLaunchArgument("use_ekf", default_value="false"),
         DeclareLaunchArgument("use_ego", default_value="true"),
+        DeclareLaunchArgument("use_mission", default_value="false"),
         DeclareLaunchArgument("use_serial", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("port", default_value="/dev/ttyACM0"),
@@ -121,10 +139,12 @@ def generate_launch_description():
         DeclareLaunchArgument("fast_lio_config_file", default_value="mid360.yaml"),
         DeclareLaunchArgument("goal_yaw_mode", default_value="hold"),
         DeclareLaunchArgument("yaw_done_deg", default_value="5.0"),
+        DeclareLaunchArgument("mission_file", default_value=default_mission_file),
 
         livox_launch,
         TimerAction(period=2.0, actions=[fast_lio_launch]),
         TimerAction(period=4.0, actions=[ekf_launch]),
         TimerAction(period=6.0, actions=[ego_launch]),
         TimerAction(period=8.0, actions=[serial_node]),
+        TimerAction(period=9.0, actions=[mission_launch]),
     ])

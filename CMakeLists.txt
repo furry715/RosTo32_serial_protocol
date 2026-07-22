@@ -4,6 +4,7 @@ project(serial_protocol)
 # ????????
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -62,6 +63,10 @@ install(TARGETS
     ego_tracker_node
     DESTINATION lib/${PROJECT_NAME}
 )
+install(PROGRAMS
+    scripts/mission_node.py
+    DESTINATION lib/${PROJECT_NAME}
+)
 
 # ????????????????????
 install(DIRECTORY include/
@@ -72,6 +77,12 @@ install(DIRECTORY launch/
 )
 install(DIRECTORY rviz/
     DESTINATION share/${PROJECT_NAME}
+)
+install(DIRECTORY docs/
+    DESTINATION share/${PROJECT_NAME}
+)
+install(DIRECTORY config/
+    DESTINATION share/${PROJECT_NAME}/config
 )
 
 ament_package()

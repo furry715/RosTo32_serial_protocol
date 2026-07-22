@@ -143,6 +143,12 @@ def generate_launch_description():
             "follow_traj_yaw": False,
             "goal_yaw_mode": goal_yaw_mode,
             "yaw_done_deg": yaw_done_deg,
+            "dx": 0.0,
+            "dy": 0.0,
+            "dz": 0.0,
+            "px": 1.2,
+            "py": 1.2,
+            "pz": 1.1,
         }],
     )
 

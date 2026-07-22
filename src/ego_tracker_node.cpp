@@ -8,6 +8,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <quadrotor_msgs/msg/position_command.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -40,6 +41,7 @@ class EgoTrackerNode : public rclcpp::Node {
     declare_parameter<std::string>("position_cmd_topic", "/position_cmd");
     declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     declare_parameter<std::string>("goal_topic", "/move_base_simple/goal");
+    declare_parameter<std::string>("goal_reached_topic", "/mission/goal_reached");
     declare_parameter<double>("feedforward_gain", 0.8);
     declare_parameter<double>("px", 1.0);
     declare_parameter<double>("py", 1.0);
@@ -56,6 +58,10 @@ class EgoTrackerNode : public rclcpp::Node {
     declare_parameter<double>("max_vel_z", 1.0);
     declare_parameter<double>("command_timeout", 0.5);
     declare_parameter<double>("stop_dist", 0.3);
+    declare_parameter<double>("reach_dist", 0.25);
+    declare_parameter<double>("reach_vel", 0.15);
+    declare_parameter<double>("reach_hold_time", 1.0);
+    declare_parameter<bool>("reach_check_yaw", true);
     declare_parameter<bool>("auto_takeoff_hover", false);
     declare_parameter<double>("hover_altitude", 1.0);
     declare_parameter<double>("hover_gain", 1.0);
@@ -64,6 +70,7 @@ class EgoTrackerNode : public rclcpp::Node {
     position_cmd_topic_ = get_parameter("position_cmd_topic").as_string();
     cmd_vel_topic_ = get_parameter("cmd_vel_topic").as_string();
     goal_topic_ = get_parameter("goal_topic").as_string();
+    goal_reached_topic_ = get_parameter("goal_reached_topic").as_string();
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_, rclcpp::QoS(20),
@@ -80,6 +87,8 @@ class EgoTrackerNode : public rclcpp::Node {
 
     cmd_vel_pub_ =
         create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 20);
+    goal_reached_pub_ =
+        create_publisher<std_msgs::msg::Bool>(goal_reached_topic_, 10);
     trackpoint_pub_ =
         create_publisher<visualization_msgs::msg::Marker>("/track_drone_point", 10);
 
@@ -123,6 +132,8 @@ class EgoTrackerNode : public rclcpp::Node {
   void goal_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     latest_goal_ = msg;
     has_goal_ = true;
+    goal_reached_ = false;
+    reach_timer_active_ = false;
     update_target_yaw_from_goal(*msg);
   }
 
@@ -134,7 +145,9 @@ class EgoTrackerNode : public rclcpp::Node {
     geometry_msgs::msg::Twist cmd_vel;
     if (!has_cmd_ || (now() - last_cmd_time_).seconds() >
                          get_parameter("command_timeout").as_double()) {
-      if (get_parameter("auto_takeoff_hover").as_bool() && has_initial_pose_ &&
+      if (has_goal_) {
+        cmd_vel = compute_goal_hold_cmd();
+      } else if (get_parameter("auto_takeoff_hover").as_bool() && has_initial_pose_ &&
           !has_goal_) {
         const double hover_gain = get_parameter("hover_gain").as_double();
         const double hover_altitude = get_parameter("hover_altitude").as_double();
@@ -167,6 +180,7 @@ class EgoTrackerNode : public rclcpp::Node {
           cmd_vel.angular.z = yaw_rate;
         }
       }
+      update_goal_reached();
       cmd_vel_pub_->publish(cmd_vel);
       return;
     }
@@ -262,7 +276,59 @@ class EgoTrackerNode : public rclcpp::Node {
     cmd_vel.linear.y = vel_y;
     cmd_vel.linear.z = vel_z;
     cmd_vel.angular.z = yaw_rate;
+    update_goal_reached();
     cmd_vel_pub_->publish(cmd_vel);
+  }
+
+  geometry_msgs::msg::Twist compute_goal_hold_cmd() {
+    geometry_msgs::msg::Twist cmd_vel;
+    if (!latest_goal_ || !latest_odom_) {
+      return cmd_vel;
+    }
+
+    const double px = get_parameter("px").as_double();
+    const double py = get_parameter("py").as_double();
+    const double pz = get_parameter("pz").as_double();
+    const double dx = get_parameter("dx").as_double();
+    const double dy = get_parameter("dy").as_double();
+    const double dz = get_parameter("dz").as_double();
+
+    const double dx_world =
+        latest_goal_->pose.position.x - latest_odom_->pose.pose.position.x;
+    const double dy_world =
+        latest_goal_->pose.position.y - latest_odom_->pose.pose.position.y;
+    const double dz_world =
+        latest_goal_->pose.position.z - latest_odom_->pose.pose.position.z;
+
+    const double body_error_x =
+        dx_world * std::cos(current_yaw_) + dy_world * std::sin(current_yaw_);
+    const double body_error_y =
+        -dx_world * std::sin(current_yaw_) + dy_world * std::cos(current_yaw_);
+
+    const double max_vel_xy = get_parameter("max_vel_xy").as_double();
+    const double max_vel_z = get_parameter("max_vel_z").as_double();
+    cmd_vel.linear.x =
+        clamp(px * body_error_x - dx * latest_odom_->twist.twist.linear.x,
+              -max_vel_xy, max_vel_xy);
+    cmd_vel.linear.y =
+        clamp(py * body_error_y - dy * latest_odom_->twist.twist.linear.y,
+              -max_vel_xy, max_vel_xy);
+    cmd_vel.linear.z =
+        clamp(pz * dz_world - dz * latest_odom_->twist.twist.linear.z,
+              -max_vel_z, max_vel_z);
+
+    const std::string goal_yaw_mode =
+        get_parameter("goal_yaw_mode").as_string();
+    if (goal_yaw_mode == "hold") {
+      double yaw_error = 0.0;
+      double yaw_rate = 0.0;
+      if (compute_target_yaw_rate(yaw_error, yaw_rate) &&
+          !is_yaw_done(yaw_error)) {
+        cmd_vel.angular.z = yaw_rate;
+      }
+    }
+
+    return cmd_vel;
   }
 
   void publish_trackpoint(const quadrotor_msgs::msg::PositionCommand & cmd) {
@@ -321,16 +387,63 @@ class EgoTrackerNode : public rclcpp::Node {
     return std::abs(yaw_error) <= yaw_done;
   }
 
+  void update_goal_reached() {
+    bool reached_now = false;
+    if (has_goal_ && latest_goal_ && latest_odom_) {
+      const double ex =
+          latest_goal_->pose.position.x - latest_odom_->pose.pose.position.x;
+      const double ey =
+          latest_goal_->pose.position.y - latest_odom_->pose.pose.position.y;
+      const double ez =
+          latest_goal_->pose.position.z - latest_odom_->pose.pose.position.z;
+      const double pos_error = std::sqrt(ex * ex + ey * ey + ez * ez);
+      const auto &vel = latest_odom_->twist.twist.linear;
+      const double vel_norm =
+          std::sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+
+      bool yaw_ok = true;
+      if (get_parameter("reach_check_yaw").as_bool() && has_target_yaw_) {
+        const double yaw_error = wrap_angle(target_yaw_ - current_yaw_);
+        yaw_ok = is_yaw_done(yaw_error);
+      }
+
+      reached_now =
+          pos_error <= get_parameter("reach_dist").as_double() &&
+          vel_norm <= get_parameter("reach_vel").as_double() &&
+          yaw_ok;
+    }
+
+    const auto stamp = now();
+    if (reached_now) {
+      if (!reach_timer_active_) {
+        reach_start_time_ = stamp;
+        reach_timer_active_ = true;
+      }
+      goal_reached_ =
+          (stamp - reach_start_time_).seconds() >=
+          get_parameter("reach_hold_time").as_double();
+    } else {
+      reach_timer_active_ = false;
+      goal_reached_ = false;
+    }
+
+    std_msgs::msg::Bool msg;
+    msg.data = goal_reached_;
+    goal_reached_pub_->publish(msg);
+  }
+
   std::string odom_topic_;
   std::string position_cmd_topic_;
   std::string cmd_vel_topic_;
   std::string goal_topic_;
+  std::string goal_reached_topic_;
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<quadrotor_msgs::msg::PositionCommand>::SharedPtr
       position_cmd_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr goal_reached_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr trackpoint_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -344,10 +457,13 @@ class EgoTrackerNode : public rclcpp::Node {
   bool has_goal_{false};
   bool has_initial_pose_{false};
   bool has_target_yaw_{false};
+  bool goal_reached_{false};
+  bool reach_timer_active_{false};
   double current_yaw_{0.0};
   double target_yaw_{0.0};
   double init_x_{0.0};
   double init_y_{0.0};
+  rclcpp::Time reach_start_time_{0, 0, RCL_ROS_TIME};
 };
 
 int main(int argc, char **argv) {
