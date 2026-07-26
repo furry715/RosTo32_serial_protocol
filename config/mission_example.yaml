@@ -7,26 +7,50 @@ mission:
   default_reach_timeout: 30.0
 
 waypoints:
-  - name: takeoff
-    pose: {x: 0.0, y: 0.0, z: 1.0, yaw_deg: 0.0}
+  - name: takeoff_0p7
+    pose: {x: 0.0, y: 0.0, z: 0.7, yaw_deg: 0.0}
     gates:
       - type: hold
         duration: 2.0
 
-  - name: forward_1m
-    pose: {x: 1.0, y: 0.0, z: 1.0, yaw_deg: 0.0}
+  - name: right_0p5
+    pose: {x: 0.0, y: -0.5, z: 0.7, yaw_deg: 0.0}
+    gates:
+      - type: hold
+        duration: 1.0
+
+  - name: down_0p3
+    pose: {x: 0.0, y: -0.5, z: 0.4, yaw_deg: 0.0}
+    gates:
+      - type: hold
+        duration: 1.0
+
+  - name: right_1p0
+    pose: {x: 0.0, y: -1.0, z: 0.4, yaw_deg: 0.0}
+    gates:
+      - type: hold
+        duration: 1.0
+
+  - name: up_0p3
+    pose: {x: 0.0, y: -1.0, z: 0.7, yaw_deg: 0.0}
+    gates:
+      - type: hold
+        duration: 1.0
+
+  - name: forward_0p5
+    pose: {x: 0.5, y: -1.0, z: 0.7, yaw_deg: 0.0}
+    gates:
+      - type: hold
+        duration: 1.0
+
+  - name: yaw_180
+    pose: {x: 0.5, y: -1.0, z: 0.7, yaw_deg: 180.0}
     gates:
       - type: hold
         duration: 2.0
 
-  - name: turn_right_90
-    pose: {x: 1.0, y: 0.0, z: 1.0, yaw_deg: -90.0}
-    gates:
-      - type: hold
-        duration: 2.0
-
-  - name: landing_approach
-    pose: {x: 1.0, y: 0.0, z: 0.5, yaw_deg: -90.0}
+  - name: final_down_0p3
+    pose: {x: 0.5, y: -1.0, z: 0.4, yaw_deg: 180.0}
     gates:
       - type: hold
         duration: 2.0

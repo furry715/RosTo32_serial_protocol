@@ -11,6 +11,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PythonExpression
 from launch_ros.actions import Node
 
 
@@ -36,12 +37,15 @@ def generate_launch_description():
     package_path = get_package_share_directory("serial_protocol")
     default_mission_file = os.path.join(
         package_path, "config", "mission_example.yaml")
+    default_task_map_file = os.path.join(
+        package_path, "config", "task_map.yaml")
 
     use_livox = LaunchConfiguration("use_livox")
     use_fast_lio = LaunchConfiguration("use_fast_lio")
     use_ekf = LaunchConfiguration("use_ekf")
     use_ego = LaunchConfiguration("use_ego")
     use_mission = LaunchConfiguration("use_mission")
+    use_task_manager = LaunchConfiguration("use_task_manager")
     use_serial = LaunchConfiguration("use_serial")
     rviz = LaunchConfiguration("rviz")
 
@@ -57,6 +61,8 @@ def generate_launch_description():
     goal_yaw_mode = LaunchConfiguration("goal_yaw_mode")
     yaw_done_deg = LaunchConfiguration("yaw_done_deg")
     mission_file = LaunchConfiguration("mission_file")
+    mission_auto_start = LaunchConfiguration("mission_auto_start")
+    task_map_file = LaunchConfiguration("task_map_file")
 
     livox_launch = include_launch(
         "livox_ros_driver2",
@@ -101,10 +107,21 @@ def generate_launch_description():
         "mission.launch.py",
         {
             "mission_file": mission_file,
-            "auto_start": "true",
+            "auto_start": mission_auto_start,
         },
         condition=IfCondition(use_mission),
         launch_dir=".",
+    )
+
+    task_manager_node = Node(
+        package="serial_protocol",
+        executable="task_manager_node.py",
+        name="task_manager_node",
+        output="screen",
+        parameters=[{
+            "task_map_file": task_map_file,
+        }],
+        condition=IfCondition(use_task_manager),
     )
 
     serial_node = Node(
@@ -127,6 +144,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_ekf", default_value="false"),
         DeclareLaunchArgument("use_ego", default_value="true"),
         DeclareLaunchArgument("use_mission", default_value="false"),
+        DeclareLaunchArgument("use_task_manager", default_value="false"),
         DeclareLaunchArgument("use_serial", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("port", default_value="/dev/ttyACM0"),
@@ -140,6 +158,13 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_yaw_mode", default_value="hold"),
         DeclareLaunchArgument("yaw_done_deg", default_value="5.0"),
         DeclareLaunchArgument("mission_file", default_value=default_mission_file),
+        DeclareLaunchArgument(
+            "mission_auto_start",
+            default_value=PythonExpression([
+                "'false' if '", use_task_manager, "' == 'true' else 'true'"
+            ]),
+        ),
+        DeclareLaunchArgument("task_map_file", default_value=default_task_map_file),
 
         livox_launch,
         TimerAction(period=2.0, actions=[fast_lio_launch]),
@@ -147,4 +172,5 @@ def generate_launch_description():
         TimerAction(period=6.0, actions=[ego_launch]),
         TimerAction(period=8.0, actions=[serial_node]),
         TimerAction(period=9.0, actions=[mission_launch]),
+        TimerAction(period=9.5, actions=[task_manager_node]),
     ])

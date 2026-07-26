@@ -44,6 +44,9 @@ class MissionNode(Node):
         self.declare_parameter("state_topic", "/mission/state")
         self.declare_parameter("current_waypoint_topic", "/mission/current_waypoint")
         self.declare_parameter("gate_status_topic", "/mission/gate_status")
+        self.declare_parameter("load_file_topic", "/mission/load_file")
+        self.declare_parameter("start_topic", "/mission/start")
+        self.declare_parameter("cancel_topic", "/mission/cancel")
         self.declare_parameter("auto_start", True)
         self.declare_parameter("tick_hz", 10.0)
 
@@ -51,18 +54,14 @@ class MissionNode(Node):
         self.goal_topic = self.get_parameter("goal_topic").value
         self.auto_start = bool(self.get_parameter("auto_start").value)
 
-        self.config = self._load_mission(self.mission_file)
-        self.frame_id = self.config.get("mission", {}).get("frame_id", "camera_init")
-        self.auto_arm = bool(self.config.get("mission", {}).get("auto_arm", False))
-        self.auto_land = bool(self.config.get("mission", {}).get("auto_land", False))
-        self.auto_disarm = bool(self.config.get("mission", {}).get("auto_disarm", False))
-        self.arm_idle_duration = float(
-            self.config.get("mission", {}).get("arm_idle_duration", 0.0)
-        )
-        self.reach_timeout = float(
-            self.config.get("mission", {}).get("default_reach_timeout", 30.0)
-        )
-        self.waypoints = self._parse_waypoints(self.config.get("waypoints", []))
+        self.config = {}
+        self.frame_id = "camera_init"
+        self.auto_arm = False
+        self.auto_land = False
+        self.auto_disarm = False
+        self.arm_idle_duration = 0.0
+        self.reach_timeout = 30.0
+        self.waypoints: List[Waypoint] = []
 
         self.goal_pub = self.create_publisher(PoseStamped, self.goal_topic, 10)
         self.state_pub = self.create_publisher(
@@ -82,6 +81,24 @@ class MissionNode(Node):
             self._goal_reached_callback,
             10,
         )
+        self.load_file_sub = self.create_subscription(
+            String,
+            self.get_parameter("load_file_topic").value,
+            self._load_file_callback,
+            10,
+        )
+        self.start_sub = self.create_subscription(
+            Bool,
+            self.get_parameter("start_topic").value,
+            self._start_callback,
+            10,
+        )
+        self.cancel_sub = self.create_subscription(
+            Bool,
+            self.get_parameter("cancel_topic").value,
+            self._cancel_callback,
+            10,
+        )
 
         self.arm_client = self.create_client(Trigger, "/serial_protocol_node/arm")
         self.land_client = self.create_client(Trigger, "/serial_protocol_node/land")
@@ -98,21 +115,49 @@ class MissionNode(Node):
         tick_hz = float(self.get_parameter("tick_hz").value)
         self.timer = self.create_timer(1.0 / tick_hz, self._tick)
 
-        self.get_logger().info(
-            f"Loaded {len(self.waypoints)} waypoints from {self.mission_file}"
-        )
-        if not self.waypoints:
+        if not self._reload_mission(self.mission_file):
             self._transition("ERROR")
-            self.get_logger().error("Mission file has no waypoints")
             return
         if self.auto_start:
-            self._transition("ARMING" if self.auto_arm else "SEND_GOAL")
+            self._start_mission()
 
     def _load_mission(self, path: str) -> Dict[str, Any]:
         if not path:
             raise RuntimeError("mission_file parameter is required")
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
+
+    def _reload_mission(self, path: str) -> bool:
+        try:
+            config = self._load_mission(path)
+            waypoints = self._parse_waypoints(config.get("waypoints", []))
+        except Exception as exc:
+            self.get_logger().error(f"Failed to load mission file {path}: {exc}")
+            return False
+
+        if not waypoints:
+            self.get_logger().error(f"Mission file has no waypoints: {path}")
+            return False
+
+        self._cleanup_gates()
+        self.mission_file = path
+        self.config = config
+        mission = self.config.get("mission", {})
+        self.frame_id = mission.get("frame_id", "camera_init")
+        self.auto_arm = bool(mission.get("auto_arm", False))
+        self.auto_land = bool(mission.get("auto_land", False))
+        self.auto_disarm = bool(mission.get("auto_disarm", False))
+        self.arm_idle_duration = float(mission.get("arm_idle_duration", 0.0))
+        self.reach_timeout = float(mission.get("default_reach_timeout", 30.0))
+        self.waypoints = waypoints
+        self.wp_index = 0
+        self.goal_reached = False
+        self.active_future = None
+        self.active_service_name = ""
+        self.get_logger().info(
+            f"Loaded {len(self.waypoints)} waypoints from {self.mission_file}"
+        )
+        return True
 
     def _parse_waypoints(self, raw_waypoints: List[Dict[str, Any]]) -> List[Waypoint]:
         waypoints = []
@@ -143,6 +188,37 @@ class MissionNode(Node):
 
     def _goal_reached_callback(self, msg: Bool):
         self.goal_reached = msg.data
+
+    def _load_file_callback(self, msg: String):
+        if self.state not in ("IDLE", "FINISHED", "ERROR", "CANCELED"):
+            self.get_logger().warn(
+                f"Ignoring load request while mission is active: state={self.state}"
+            )
+            return
+        if self._reload_mission(msg.data):
+            self._transition("IDLE")
+
+    def _start_callback(self, msg: Bool):
+        if msg.data:
+            self._start_mission()
+
+    def _cancel_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        self._cleanup_gates()
+        self.goal_reached = False
+        self._transition("CANCELED")
+
+    def _start_mission(self):
+        if not self.waypoints:
+            self._error("Cannot start mission: no waypoints loaded")
+            return
+        if self.state not in ("IDLE", "FINISHED", "ERROR", "CANCELED"):
+            self.get_logger().warn(f"Ignoring start request while state={self.state}")
+            return
+        self.wp_index = 0
+        self.goal_reached = False
+        self._transition("ARMING" if self.auto_arm else "SEND_GOAL")
 
     def _tick(self):
         self._publish_status()

@@ -27,7 +27,9 @@
 #include <geometry_msgs/msg/quaternion_stamped.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/byte_multi_array.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+#include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include <memory>
@@ -83,7 +85,8 @@ public:
     static constexpr uint8_t CMD_ARM      = 0x00;   // Unlock
     static constexpr uint8_t CMD_DISARM   = 0x01;   // Lock
     static constexpr uint8_t CMD_LAND     = 0x02;   // Land
-    static constexpr uint8_t CMD_VELOCITY = 0x06;   // �ٶȿ���
+    static constexpr uint8_t CMD_VELOCITY = 0x06;
+    static constexpr uint8_t CMD_TASK_RUNNING = 0x11; // OBC -> FC task running state
     static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // ��������ռλ�������͵� FC
 
     // �ɿط��͸����ǵ�ң�� ID���� FC UserTask_OneKeyCmd ���룩
@@ -91,6 +94,9 @@ public:
     static constexpr uint8_t FC_ID_QUATERNION = 0x04;
     static constexpr uint8_t FC_ID_ALTITUDE   = 0x05;
     static constexpr uint8_t FC_ID_VELOCITY   = 0x07;
+    static constexpr uint8_t FC_ID_SHELF_TARGET = 0x08;
+    static constexpr uint8_t FC_ID_TRAVERSE_TASK_REQUEST = 0x09;
+    static constexpr uint8_t FC_ID_TARGETED_TASK_REQUEST = 0x10;
 
     enum Priority : int {
         PRIORITY_HEARTBEAT = 0,
@@ -130,6 +136,9 @@ public:
         vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10,
             std::bind(&SerialProtocolNode::vel_callback, this, std::placeholders::_1));
+        task_running_sub_ = create_subscription<std_msgs::msg::Bool>(
+            "/task/running", 10,
+            std::bind(&SerialProtocolNode::task_running_callback, this, std::placeholders::_1));
 
         // ���� ���� ��������������������������������������������������������������������������������������������������������������������
         arm_srv_ = create_service<std_srvs::srv::Trigger>(
@@ -156,6 +165,8 @@ public:
         fc_vel_pub_ = create_publisher<geometry_msgs::msg::Twist>("/fc/velocity",        10);
         fc_vel_stamped_pub_ = create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>(
             "/fc/velocity_stamped", 10);
+        task_request_pub_ = create_publisher<std_msgs::msg::UInt8>("/fc/task_request", 10);
+        shelf_target_pub_ = create_publisher<std_msgs::msg::UInt8MultiArray>("/fc/shelf_target", 10);
 
         // ���� ���Ͷ�ʱ�� ��������������������������������������������������������������������������������������������������������
         double period = 1.0 / get_parameter("send_rate_hz").as_double();
@@ -197,6 +208,18 @@ private:
         desired_vel_[3] = static_cast<int16_t>(msg->angular.z * 180.0 / M_PI);
         last_vel_time_  = now();
         request_command(CMD_VELOCITY, desired_vel_, PRIORITY_VELOCITY, false);
+    }
+
+    void task_running_callback(const std_msgs::msg::Bool::SharedPtr msg)
+    {
+        uint8_t data = msg->data ? 1 : 0;
+        uint8_t buf[8];
+        size_t frame_len = build_frame(buf, CMD_TASK_RUNNING, &data, 1);
+        if (!serial_) return;
+        std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
+        if (!serial_->write(buf, frame_len)) {
+            RCLCPP_ERROR(get_logger(), "Serial task running write failed");
+        }
     }
 
     void handle_arm(const std_srvs::srv::Trigger::Request::SharedPtr,
@@ -342,6 +365,7 @@ private:
                 << static_cast<int>(buf[i]) << ' ';
         RCLCPP_DEBUG(get_logger(), "%s", oss.str().c_str());
 
+        std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
         if (!serial_->write(buf, frame_len)) {
             RCLCPP_ERROR(get_logger(), "Serial write failed");
         }
@@ -408,6 +432,9 @@ private:
                     case FC_ID_QUATERNION: data_expect = 9; break;
                     case FC_ID_ALTITUDE:   data_expect = 9; break;
                     case FC_ID_VELOCITY:   data_expect = 6; break;
+                    case FC_ID_SHELF_TARGET: data_expect = 2; break;
+                    case FC_ID_TRAVERSE_TASK_REQUEST: data_expect = 0; break;
+                    case FC_ID_TARGETED_TASK_REQUEST: data_expect = 0; break;
                     default:
                         // δ֪ ID��������֡
                         state = RxState::WAIT_HEAD;
@@ -543,6 +570,31 @@ private:
             break;
         }
 
+        case FC_ID_SHELF_TARGET: {
+            if (len < 2) break;
+            auto msg = std_msgs::msg::UInt8MultiArray();
+            msg.data = {data[0], data[1]};
+            shelf_target_pub_->publish(msg);
+            RCLCPP_INFO(get_logger(), "Shelf target received: shelf=0x%02X bin=%u", data[0], data[1]);
+            break;
+        }
+
+        case FC_ID_TRAVERSE_TASK_REQUEST: {
+            auto msg = std_msgs::msg::UInt8();
+            msg.data = 1;
+            task_request_pub_->publish(msg);
+            RCLCPP_INFO(get_logger(), "Traverse task request received");
+            break;
+        }
+
+        case FC_ID_TARGETED_TASK_REQUEST: {
+            auto msg = std_msgs::msg::UInt8();
+            msg.data = 2;
+            task_request_pub_->publish(msg);
+            RCLCPP_INFO(get_logger(), "Targeted task request received");
+            break;
+        }
+
         default:
             break;
         }
@@ -554,6 +606,7 @@ private:
 
     // ����
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr vel_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr task_running_sub_;
 
     // ����
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
@@ -566,10 +619,13 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr alt_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr        fc_vel_pub_;
     rclcpp::Publisher<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr fc_vel_stamped_pub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr task_request_pub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr shelf_target_pub_;
 
     rclcpp::TimerBase::SharedPtr send_timer_;
 
     std::mutex mutex_;
+    std::mutex serial_write_mutex_;
     int16_t    desired_vel_[4]  = {0, 0, 0, 0};
     rclcpp::Time last_vel_time_;
 
