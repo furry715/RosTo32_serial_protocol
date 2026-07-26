@@ -62,6 +62,7 @@ class EgoTrackerNode : public rclcpp::Node {
     declare_parameter<double>("reach_vel", 0.15);
     declare_parameter<double>("reach_hold_time", 1.0);
     declare_parameter<bool>("reach_check_yaw", true);
+    declare_parameter<bool>("goal_hold_requires_position_cmd", true);
     declare_parameter<bool>("auto_takeoff_hover", false);
     declare_parameter<double>("hover_altitude", 1.0);
     declare_parameter<double>("hover_gain", 1.0);
@@ -126,12 +127,16 @@ class EgoTrackerNode : public rclcpp::Node {
     latest_cmd_ = msg;
     last_cmd_time_ = now();
     has_cmd_ = true;
+    if (has_goal_) {
+      has_cmd_for_goal_ = true;
+    }
     publish_trackpoint(*msg);
   }
 
   void goal_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     latest_goal_ = msg;
     has_goal_ = true;
+    has_cmd_for_goal_ = false;
     goal_reached_ = false;
     reach_timer_active_ = false;
     update_target_yaw_from_goal(*msg);
@@ -145,7 +150,11 @@ class EgoTrackerNode : public rclcpp::Node {
     geometry_msgs::msg::Twist cmd_vel;
     if (!has_cmd_ || (now() - last_cmd_time_).seconds() >
                          get_parameter("command_timeout").as_double()) {
-      if (has_goal_) {
+      const bool can_hold_goal =
+          has_goal_ &&
+          (!get_parameter("goal_hold_requires_position_cmd").as_bool() ||
+           has_cmd_for_goal_);
+      if (can_hold_goal) {
         cmd_vel = compute_goal_hold_cmd();
       } else if (get_parameter("auto_takeoff_hover").as_bool() && has_initial_pose_ &&
           !has_goal_) {
@@ -457,6 +466,7 @@ class EgoTrackerNode : public rclcpp::Node {
   bool has_goal_{false};
   bool has_initial_pose_{false};
   bool has_target_yaw_{false};
+  bool has_cmd_for_goal_{false};
   bool goal_reached_{false};
   bool reach_timer_active_{false};
   double current_yaw_{0.0};
