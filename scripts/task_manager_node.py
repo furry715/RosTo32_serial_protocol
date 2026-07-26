@@ -35,43 +35,43 @@ class TaskManagerNode(Node):
         self.declare_parameter("start_delay", 0.5)
         self.declare_parameter("feedback_hz", 2.0)
 
-        self.task_map_file = self.get_parameter("task_map_file").as_string()
+        self.task_map_file = self.get_parameter("task_map_file").value
         self.task_map = self._load_task_map(self.task_map_file)
 
         self.mission_load_pub = self.create_publisher(
-            String, self.get_parameter("mission_load_file_topic").as_string(), 10
+            String, self.get_parameter("mission_load_file_topic").value, 10
         )
         self.mission_start_pub = self.create_publisher(
-            Bool, self.get_parameter("mission_start_topic").as_string(), 10
+            Bool, self.get_parameter("mission_start_topic").value, 10
         )
         self.mission_cancel_pub = self.create_publisher(
-            Bool, self.get_parameter("mission_cancel_topic").as_string(), 10
+            Bool, self.get_parameter("mission_cancel_topic").value, 10
         )
         self.task_state_pub = self.create_publisher(
-            String, self.get_parameter("task_state_topic").as_string(), 10
+            String, self.get_parameter("task_state_topic").value, 10
         )
         self.task_current_pub = self.create_publisher(
-            UInt8, self.get_parameter("task_current_topic").as_string(), 10
+            UInt8, self.get_parameter("task_current_topic").value, 10
         )
         self.task_running_pub = self.create_publisher(
-            Bool, self.get_parameter("task_running_topic").as_string(), 10
+            Bool, self.get_parameter("task_running_topic").value, 10
         )
 
         self.task_request_sub = self.create_subscription(
             UInt8,
-            self.get_parameter("task_request_topic").as_string(),
+            self.get_parameter("task_request_topic").value,
             self._task_request_callback,
             10,
         )
         self.mission_state_sub = self.create_subscription(
             String,
-            self.get_parameter("mission_state_topic").as_string(),
+            self.get_parameter("mission_state_topic").value,
             self._mission_state_callback,
             10,
         )
         self.current_waypoint_sub = self.create_subscription(
             String,
-            self.get_parameter("mission_current_waypoint_topic").as_string(),
+            self.get_parameter("mission_current_waypoint_topic").value,
             self._current_waypoint_callback,
             10,
         )
