@@ -1,26 +1,26 @@
 mission:
   frame_id: camera_init
   auto_arm: true
-  arm_idle_duration: 2.0
+  arm_idle_duration: 3.0
   auto_land: true
   auto_disarm: false
   default_reach_timeout: 30.0
 
 waypoints:
   - name: takeoff_0p7
-    pose: {x: 0.0, y: 0.0, z: 0.7, yaw_deg: 0.0}
+    pose: {x: 0.0, y: 0.0, z: 0.8, yaw_deg: 0.0}
     gates:
       - type: hold
         duration: 2.0
 
   - name: forward_0p5
-    pose: {x: 0.5, y: 0.0, z: 0.7, yaw_deg: 0.0}
+    pose: {x: 0.0, y: 1.0, z: 0.8, yaw_deg: 0.0}
     gates:
       - type: hold
         duration: 2.0
 
   - name: landing_approach
-    pose: {x: 0.5, y: 0.0, z: 0.4, yaw_deg: 0.0}
+    pose: {x: 0.0, y: 1.0, z: 0.4, yaw_deg: 0.0}
     gates:
       - type: hold
         duration: 2.0

@@ -55,13 +55,15 @@ class EgoTrackerNode : public rclcpp::Node {
     declare_parameter<std::string>("goal_yaw_mode", "hold");
     declare_parameter<double>("yaw_done_deg", 5.0);
     declare_parameter<double>("max_vel_xy", 0.5);
-    declare_parameter<double>("max_vel_z", 1.0);
+    declare_parameter<double>("max_vel_z", 0.5);
     declare_parameter<double>("command_timeout", 0.5);
     declare_parameter<double>("stop_dist", 0.3);
     declare_parameter<double>("reach_dist", 0.25);
     declare_parameter<double>("reach_vel", 0.15);
     declare_parameter<double>("reach_hold_time", 1.0);
     declare_parameter<bool>("reach_check_yaw", true);
+    declare_parameter<double>("max_odom_age", 0.25);
+    declare_parameter<bool>("reject_nonmonotonic_odom", true);
     declare_parameter<bool>("goal_hold_requires_position_cmd", true);
     declare_parameter<bool>("hold_goal_after_command_timeout", false);
     declare_parameter<bool>("auto_takeoff_hover", false);
@@ -106,7 +108,31 @@ class EgoTrackerNode : public rclcpp::Node {
 
  private:
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    const rclcpp::Time stamp(msg->header.stamp);
+    const double age = (now() - stamp).seconds();
+    const double max_odom_age = get_parameter("max_odom_age").as_double();
+    if (max_odom_age > 0.0 && age > max_odom_age) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Reject stale odom: age=%.3fs max=%.3fs frame=%s z=%.3f",
+          age, max_odom_age, msg->header.frame_id.c_str(),
+          msg->pose.pose.position.z);
+      return;
+    }
+
+    if (get_parameter("reject_nonmonotonic_odom").as_bool() &&
+        has_last_odom_stamp_ && stamp <= last_odom_stamp_) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Reject non-monotonic odom: stamp=%.6f last=%.6f z=%.3f",
+          stamp.seconds(), last_odom_stamp_.seconds(),
+          msg->pose.pose.position.z);
+      return;
+    }
+
     latest_odom_ = msg;
+    last_odom_stamp_ = stamp;
+    has_last_odom_stamp_ = true;
     has_odom_ = true;
     if (!has_initial_pose_) {
       init_x_ = msg->pose.pose.position.x;
@@ -147,6 +173,13 @@ class EgoTrackerNode : public rclcpp::Node {
 
   void control_loop() {
     if (!has_odom_) {
+      return;
+    }
+    if (!is_latest_odom_fresh()) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Latest valid odom is stale; publish zero cmd_vel and skip control");
+      cmd_vel_pub_->publish(geometry_msgs::msg::Twist());
       return;
     }
 
@@ -400,6 +433,18 @@ class EgoTrackerNode : public rclcpp::Node {
     return std::abs(yaw_error) <= yaw_done;
   }
 
+  bool is_latest_odom_fresh() {
+    if (!latest_odom_) {
+      return false;
+    }
+    const double max_odom_age = get_parameter("max_odom_age").as_double();
+    if (max_odom_age <= 0.0) {
+      return true;
+    }
+    const rclcpp::Time stamp(latest_odom_->header.stamp);
+    return (now() - stamp).seconds() <= max_odom_age;
+  }
+
   void update_goal_reached() {
     bool reached_now = false;
     if (has_goal_ && latest_goal_ && latest_odom_) {
@@ -464,8 +509,10 @@ class EgoTrackerNode : public rclcpp::Node {
   quadrotor_msgs::msg::PositionCommand::SharedPtr latest_cmd_;
   geometry_msgs::msg::PoseStamped::SharedPtr latest_goal_;
   rclcpp::Time last_cmd_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
 
   bool has_odom_{false};
+  bool has_last_odom_stamp_{false};
   bool has_cmd_{false};
   bool has_goal_{false};
   bool has_initial_pose_{false};

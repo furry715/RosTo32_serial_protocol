@@ -60,6 +60,8 @@ def generate_launch_description():
     fast_lio_config_file = LaunchConfiguration("fast_lio_config_file")
     goal_yaw_mode = LaunchConfiguration("goal_yaw_mode")
     yaw_done_deg = LaunchConfiguration("yaw_done_deg")
+    max_odom_age = LaunchConfiguration("max_odom_age")
+    reject_nonmonotonic_odom = LaunchConfiguration("reject_nonmonotonic_odom")
     mission_file = LaunchConfiguration("mission_file")
     mission_auto_start = LaunchConfiguration("mission_auto_start")
     task_map_file = LaunchConfiguration("task_map_file")
@@ -97,6 +99,8 @@ def generate_launch_description():
             "rviz": rviz,
             "goal_yaw_mode": goal_yaw_mode,
             "yaw_done_deg": yaw_done_deg,
+            "max_odom_age": max_odom_age,
+            "reject_nonmonotonic_odom": reject_nonmonotonic_odom,
         },
         condition=IfCondition(use_ego),
         launch_dir=".",
@@ -157,6 +161,8 @@ def generate_launch_description():
         DeclareLaunchArgument("fast_lio_config_file", default_value="mid360.yaml"),
         DeclareLaunchArgument("goal_yaw_mode", default_value="hold"),
         DeclareLaunchArgument("yaw_done_deg", default_value="5.0"),
+        DeclareLaunchArgument("max_odom_age", default_value="0.25"),
+        DeclareLaunchArgument("reject_nonmonotonic_odom", default_value="true"),
         DeclareLaunchArgument("mission_file", default_value=default_mission_file),
         DeclareLaunchArgument(
             "mission_auto_start",

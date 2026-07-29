@@ -21,6 +21,8 @@ def generate_launch_description():
     planning_horizon = LaunchConfiguration("planning_horizon")
     goal_yaw_mode = LaunchConfiguration("goal_yaw_mode")
     yaw_done_deg = LaunchConfiguration("yaw_done_deg")
+    max_odom_age = LaunchConfiguration("max_odom_age")
+    reject_nonmonotonic_odom = LaunchConfiguration("reject_nonmonotonic_odom")
 
     map_size_x = LaunchConfiguration("map_size_x")
     map_size_y = LaunchConfiguration("map_size_y")
@@ -92,7 +94,7 @@ def generate_launch_description():
             "grid_map/self_clearance_z": 0.22,
             "grid_map/obstacles_inflation": 0.05,
             "grid_map/local_map_margin": 10,
-            "grid_map/ground_height": -0.01,
+            "grid_map/ground_height": -0.30,
             "grid_map/visualization_truncate_height": 3.0,
             "grid_map/pose_type": 1,
             "grid_map/frame_id": "camera_init",
@@ -143,9 +145,12 @@ def generate_launch_description():
             "follow_traj_yaw": False,
             "goal_yaw_mode": goal_yaw_mode,
             "yaw_done_deg": yaw_done_deg,
-            "dx": 0.0,
-            "dy": 0.0,
-            "dz": 0.0,
+            "max_odom_age": max_odom_age,
+            "reject_nonmonotonic_odom": reject_nonmonotonic_odom,
+            "dx": 0.12,
+            "dy": 0.12,
+            "dz": 0.12,
+            "feedforward_gain": 0.7,
             "px": 1.2,
             "py": 1.2,
             "pz": 1.1,
@@ -172,6 +177,8 @@ def generate_launch_description():
         DeclareLaunchArgument("planning_horizon", default_value="7.5"),
         DeclareLaunchArgument("goal_yaw_mode", default_value="hold"),
         DeclareLaunchArgument("yaw_done_deg", default_value="5.0"),
+        DeclareLaunchArgument("max_odom_age", default_value="0.25"),
+        DeclareLaunchArgument("reject_nonmonotonic_odom", default_value="true"),
         DeclareLaunchArgument("map_size_x", default_value="42.0"),
         DeclareLaunchArgument("map_size_y", default_value="30.0"),
         DeclareLaunchArgument("map_size_z", default_value="5.0"),
