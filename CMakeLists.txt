@@ -66,6 +66,7 @@ install(TARGETS
 install(PROGRAMS
     scripts/mission_node.py
     scripts/task_manager_node.py
+    scripts/visual_cmd_mux_node.py
     DESTINATION lib/${PROJECT_NAME}
 )
 

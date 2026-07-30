@@ -1,7 +1,7 @@
 tasks:
   1:
-    name: default_mission
-    mission_file: mission_example.yaml
+    name: visual_hover_track
+    mission_file: mission_visual_hover.yaml
   2:
     name: mission_task2
     mission_file: mission_task2.yaml

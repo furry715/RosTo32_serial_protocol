@@ -16,6 +16,7 @@ import yaml
 class Gate:
     gate_type: str
     topic: str = ""
+    service_name: str = ""
     value: Any = None
     duration: float = 0.0
     timeout: float = 0.0
@@ -23,6 +24,8 @@ class Gate:
     done: bool = False
     started_at: Optional[rclpy.time.Time] = None
     subscription: Any = None
+    client: Any = None
+    future: Any = None
 
 
 @dataclass
@@ -32,6 +35,7 @@ class Waypoint:
     y: float
     z: float
     yaw_deg: float
+    gate_mode: str = "parallel"
     gates: List[Gate] = field(default_factory=list)
 
 
@@ -171,6 +175,7 @@ class MissionNode(Node):
                     y=float(pose.get("y", 0.0)),
                     z=float(pose.get("z", 1.0)),
                     yaw_deg=float(pose.get("yaw_deg", 0.0)),
+                    gate_mode=str(raw.get("gate_mode", "parallel")).lower(),
                     gates=gates,
                 )
             )
@@ -180,6 +185,7 @@ class MissionNode(Node):
         return Gate(
             gate_type=str(raw.get("type", "hold")),
             topic=str(raw.get("topic", "")),
+            service_name=str(raw.get("service", raw.get("service_name", ""))),
             value=raw.get("value", None),
             duration=float(raw.get("duration", 0.0)),
             timeout=float(raw.get("timeout", 0.0)),
@@ -304,27 +310,86 @@ class MissionNode(Node):
             return
 
         now = self.get_clock().now()
+        if self._current_wp().gate_mode == "sequential":
+            for gate in self._current_wp().gates:
+                if gate.done:
+                    continue
+                self._handle_one_gate(gate, now)
+                self._check_gate_timeout(gate, now, use_gate_start=True)
+                return
+            self._advance_waypoint()
+            return
+
         all_done = True
         for gate in self._current_wp().gates:
             if gate.done:
                 continue
             all_done = False
-            if gate.gate_type == "hold":
-                if gate.started_at is None:
-                    gate.started_at = now
-                if (now - gate.started_at).nanoseconds * 1e-9 >= gate.duration:
-                    gate.done = True
-                    self.get_logger().info(f"Gate done: hold {gate.duration}s")
-                    continue
-
-            if gate.timeout > 0.0 and self.gates_started_at is not None:
-                elapsed = (now - self.gates_started_at).nanoseconds * 1e-9
-                if elapsed >= gate.timeout:
-                    self._handle_gate_timeout(gate)
-                    return
+            self._handle_one_gate(gate, now)
+            if self._check_gate_timeout(gate, now, use_gate_start=False):
+                return
 
         if all_done or all(g.done for g in self._current_wp().gates):
             self._advance_waypoint()
+
+    def _handle_one_gate(self, gate: Gate, now):
+        if gate.started_at is None:
+            gate.started_at = now
+
+        if gate.gate_type == "hold":
+            if (now - gate.started_at).nanoseconds * 1e-9 >= gate.duration:
+                gate.done = True
+                self.get_logger().info(f"Gate done: hold {gate.duration}s")
+            return
+
+        if gate.gate_type == "service":
+            self._handle_service_gate(gate)
+
+    def _handle_service_gate(self, gate: Gate):
+        service_name = gate.service_name or gate.topic
+        if not service_name:
+            self._error("Service gate requires service or service_name")
+            return
+
+        if gate.client is None:
+            gate.service_name = service_name
+            gate.client = self.create_client(Trigger, service_name)
+
+        if gate.future is None:
+            if not gate.client.wait_for_service(timeout_sec=0.0):
+                return
+            gate.future = gate.client.call_async(Trigger.Request())
+            self.get_logger().info(f"Calling gate service {service_name}")
+            return
+
+        if not gate.future.done():
+            return
+
+        try:
+            result = gate.future.result()
+            if not result.success:
+                self._error(f"{service_name} failed: {result.message}")
+                return
+        except Exception as exc:
+            self._error(f"{service_name} exception: {exc}")
+            return
+
+        gate.done = True
+        self.get_logger().info(f"Gate done: service {service_name}")
+
+    def _check_gate_timeout(self, gate: Gate, now, use_gate_start: bool) -> bool:
+        if gate.done:
+            return False
+        if gate.timeout <= 0.0:
+            return False
+        start = gate.started_at if use_gate_start else self.gates_started_at
+        if start is None:
+            return False
+        elapsed = (now - start).nanoseconds * 1e-9
+        if elapsed < gate.timeout:
+            return False
+        self._handle_gate_timeout(gate)
+        return True
 
     def _start_gates(self):
         self.gates_active = True
@@ -346,7 +411,7 @@ class MissionNode(Node):
                     lambda msg, g=gate: self._topic_bool_callback(g, msg),
                     10,
                 )
-            elif gate.gate_type != "hold":
+            elif gate.gate_type not in ("hold", "service"):
                 self._error(f"Unsupported gate type: {gate.gate_type}")
                 return
         self.get_logger().info(f"Waiting gates at {self._current_wp().name}")
@@ -399,6 +464,10 @@ class MissionNode(Node):
                 if gate.subscription is not None:
                     self.destroy_subscription(gate.subscription)
                     gate.subscription = None
+                if gate.client is not None:
+                    self.destroy_client(gate.client)
+                    gate.client = None
+                    gate.future = None
         self.gates_active = False
         self.gates_started_at = None
 

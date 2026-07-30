@@ -1,23 +1,27 @@
 /**
  * serial_protocol_node.cpp
  *
- * �� ANO_LX_FC_PRO �ɿ� OBC Э�飨UART2���Խӡ�
+ * ANO_LX_FC_PRO OBC protocol bridge.
  *
- * ֡��ʽ��User_Task.c / OBC_Send_Data / OBC_Recv_Callback����
+ * Frame format:
  *   [0xA5][ID][data...][CRC8][0x5B]
- *   CRC8������ʽ 0x31��init 0x00������ header+ID+data
+ *   CRC8: poly 0x31, init 0x00, over header + ID + payload.
  *
- * ROS �� FC�����ͣ���
- *   0x00  Unlock/Arm    ������  4�ֽ�
- *   0x01  Lock/Disarm   ������  4�ֽ�
- *   0x02  Land          ������  4�ֽ�
- *   0x06  �ٶȿ���       8�ֽ�   int16 vel_x/y/z cm/s + yaw_dps
+ * ROS -> FC:
+ *   0x00  Unlock/Arm, no payload
+ *   0x02  Land, no payload
+ *   0x03  Task complete, no payload
+ *   0x04  Payload release/drop, no payload
+ *   0x05  Gripper close/tighten, no payload
+ *   0x06  Velocity, 8 bytes: int16 LE vx/vy/vz cm/s + yaw deg/s
  *
- * FC �� ROS�����գ�50 Hz����
- *   0x03  ��̬   7�ֽ�   rol/pit/yaw ��0.01��, state
- *   0x04  ��Ԫ�� 9�ֽ�   q0-q3 ��0.0001, state
- *   0x05  �߶�   9�ֽ�   fused/add cm (int32), state
- *   0x07  �ٶ�   6�ֽ�   vx/vy/vz cm/s (int16)
+ * FC -> ROS:
+ *   0x03  Attitude, 7 bytes: roll/pitch/yaw 0.01 deg + state
+ *   0x04  Quaternion, 9 bytes: q0-q3 0.0001 + state
+ *   0x05  Altitude, 9 bytes: fused/add cm + state
+ *   0x07  Velocity, 6 bytes: vx/vy/vz cm/s
+ *   0x08  Task select, 1 byte: task id
+ *   0x09  Car position, 1 byte: position id
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -29,7 +33,6 @@
 #include <std_msgs/msg/byte_multi_array.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/u_int8.hpp>
-#include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include <memory>
@@ -83,10 +86,11 @@ class SerialProtocolNode : public rclcpp::Node
 public:
     // ���͸��ɿص����� ID���� FC User_Task.c OBC_Recv_Callback ���룩
     static constexpr uint8_t CMD_ARM      = 0x00;   // Unlock
-    static constexpr uint8_t CMD_DISARM   = 0x01;   // Lock
     static constexpr uint8_t CMD_LAND     = 0x02;   // Land
+    static constexpr uint8_t CMD_TASK_COMPLETE = 0x03;
+    static constexpr uint8_t CMD_PAYLOAD_RELEASE = 0x04;
+    static constexpr uint8_t CMD_GRIPPER_CLOSE = 0x05;
     static constexpr uint8_t CMD_VELOCITY = 0x06;
-    static constexpr uint8_t CMD_TASK_RUNNING = 0x11; // OBC -> FC task running state
     static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // ��������ռλ�������͵� FC
 
     // �ɿط��͸����ǵ�ң�� ID���� FC UserTask_OneKeyCmd ���룩
@@ -94,16 +98,14 @@ public:
     static constexpr uint8_t FC_ID_QUATERNION = 0x04;
     static constexpr uint8_t FC_ID_ALTITUDE   = 0x05;
     static constexpr uint8_t FC_ID_VELOCITY   = 0x07;
-    static constexpr uint8_t FC_ID_SHELF_TARGET = 0x08;
-    static constexpr uint8_t FC_ID_TRAVERSE_TASK_REQUEST = 0x09;
-    static constexpr uint8_t FC_ID_TARGETED_TASK_REQUEST = 0x10;
+    static constexpr uint8_t FC_ID_TASK_SELECT = 0x08;
+    static constexpr uint8_t FC_ID_CAR_POSITION = 0x09;
 
     enum Priority : int {
         PRIORITY_HEARTBEAT = 0,
         PRIORITY_VELOCITY  = 1,
         PRIORITY_LAND      = 3,
         PRIORITY_ARM       = 4,
-        PRIORITY_DISARM    = 5,
     };
 
     struct ActiveCommand {
@@ -153,6 +155,18 @@ public:
             "~/land",
             std::bind(&SerialProtocolNode::handle_land, this,
                       std::placeholders::_1, std::placeholders::_2));
+        task_complete_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/task_complete",
+            std::bind(&SerialProtocolNode::handle_task_complete, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        release_payload_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/release_payload",
+            std::bind(&SerialProtocolNode::handle_release_payload, this,
+                      std::placeholders::_1, std::placeholders::_2));
+        gripper_close_srv_ = create_service<std_srvs::srv::Trigger>(
+            "~/gripper_close",
+            std::bind(&SerialProtocolNode::handle_gripper_close, this,
+                      std::placeholders::_1, std::placeholders::_2));
 
         // ���� �������ɿ�ң�� ������������������������������������������������������������������������������������������������
         // /fc/attitude:  [roll_deg, pitch_deg, yaw_deg, state]
@@ -166,7 +180,7 @@ public:
         fc_vel_stamped_pub_ = create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>(
             "/fc/velocity_stamped", 10);
         task_request_pub_ = create_publisher<std_msgs::msg::UInt8>("/fc/task_request", 10);
-        shelf_target_pub_ = create_publisher<std_msgs::msg::UInt8MultiArray>("/fc/shelf_target", 10);
+        car_position_pub_ = create_publisher<std_msgs::msg::UInt8>("/fc/car_position", 10);
 
         // ���� ���Ͷ�ʱ�� ��������������������������������������������������������������������������������������������������������
         double period = 1.0 / get_parameter("send_rate_hz").as_double();
@@ -212,14 +226,15 @@ private:
 
     void task_running_callback(const std_msgs::msg::Bool::SharedPtr msg)
     {
-        uint8_t data = msg->data ? 1 : 0;
-        uint8_t buf[8];
-        size_t frame_len = build_frame(buf, CMD_TASK_RUNNING, &data, 1);
-        if (!serial_) return;
-        std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
-        if (!serial_->write(buf, frame_len)) {
-            RCLCPP_ERROR(get_logger(), "Serial task running write failed");
+        const bool running = msg->data;
+        if (last_task_running_ && !running) {
+            if (send_simple_frame(CMD_TASK_COMPLETE)) {
+                RCLCPP_INFO(get_logger(), "Task complete sent to FC (0x03)");
+            } else {
+                RCLCPP_ERROR(get_logger(), "Task complete serial write failed");
+            }
         }
+        last_task_running_ = running;
     }
 
     void handle_arm(const std_srvs::srv::Trigger::Request::SharedPtr,
@@ -234,10 +249,8 @@ private:
     void handle_disarm(const std_srvs::srv::Trigger::Request::SharedPtr,
                        std_srvs::srv::Trigger::Response::SharedPtr res)
     {
-        int16_t zero[4] = {0};
-        { std::lock_guard<std::mutex> lock(mutex_); request_command(CMD_DISARM, zero, PRIORITY_DISARM, true); }
-        res->success = true;
-        res->message = "DISARM (Lock) requested";
+        res->success = false;
+        res->message = "DISARM is not supported by the new FC OBC protocol; use land/safety landing instead";
     }
 
     void handle_land(const std_srvs::srv::Trigger::Request::SharedPtr,
@@ -247,6 +260,27 @@ private:
         { std::lock_guard<std::mutex> lock(mutex_); request_command(CMD_LAND, zero, PRIORITY_LAND, true); }
         res->success = true;
         res->message = "LAND requested";
+    }
+
+    void handle_task_complete(const std_srvs::srv::Trigger::Request::SharedPtr,
+                              std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        res->success = send_simple_frame(CMD_TASK_COMPLETE);
+        res->message = res->success ? "Task complete requested (0x03)" : "Task complete serial write failed";
+    }
+
+    void handle_release_payload(const std_srvs::srv::Trigger::Request::SharedPtr,
+                                std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        res->success = send_simple_frame(CMD_PAYLOAD_RELEASE);
+        res->message = res->success ? "Payload release requested (0x04)" : "Payload release serial write failed";
+    }
+
+    void handle_gripper_close(const std_srvs::srv::Trigger::Request::SharedPtr,
+                              std_srvs::srv::Trigger::Response::SharedPtr res)
+    {
+        res->success = send_simple_frame(CMD_GRIPPER_CLOSE);
+        res->message = res->success ? "Gripper close requested (0x05)" : "Gripper close serial write failed";
     }
 
     // ���� ������ȣ�����������ã�������������������������������������������������������������������������������������
@@ -339,7 +373,6 @@ private:
 
         switch (cmd.cmd) {
         case CMD_ARM:
-        case CMD_DISARM:
         case CMD_LAND:
             frame_len = build_frame(buf, cmd.cmd, nullptr, 0);
             break;
@@ -369,6 +402,15 @@ private:
         if (!serial_->write(buf, frame_len)) {
             RCLCPP_ERROR(get_logger(), "Serial write failed");
         }
+    }
+
+    bool send_simple_frame(uint8_t id)
+    {
+        if (!serial_) return false;
+        uint8_t buf[8];
+        size_t frame_len = build_frame(buf, id, nullptr, 0);
+        std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
+        return serial_->write(buf, frame_len);
     }
 
     /** ��ݷ�װ��ֱ�ӷ��ٶ�֡������ʱ�ã�?*/
@@ -432,9 +474,8 @@ private:
                     case FC_ID_QUATERNION: data_expect = 9; break;
                     case FC_ID_ALTITUDE:   data_expect = 9; break;
                     case FC_ID_VELOCITY:   data_expect = 6; break;
-                    case FC_ID_SHELF_TARGET: data_expect = 2; break;
-                    case FC_ID_TRAVERSE_TASK_REQUEST: data_expect = 0; break;
-                    case FC_ID_TARGETED_TASK_REQUEST: data_expect = 0; break;
+                    case FC_ID_TASK_SELECT: data_expect = 1; break;
+                    case FC_ID_CAR_POSITION: data_expect = 1; break;
                     default:
                         // δ֪ ID��������֡
                         state = RxState::WAIT_HEAD;
@@ -570,28 +611,21 @@ private:
             break;
         }
 
-        case FC_ID_SHELF_TARGET: {
-            if (len < 2) break;
-            auto msg = std_msgs::msg::UInt8MultiArray();
-            msg.data = {data[0], data[1]};
-            shelf_target_pub_->publish(msg);
-            RCLCPP_INFO(get_logger(), "Shelf target received: shelf=0x%02X bin=%u", data[0], data[1]);
+        case FC_ID_TASK_SELECT: {
+            if (len < 1) break;
+            auto msg = std_msgs::msg::UInt8();
+            msg.data = data[0];
+            task_request_pub_->publish(msg);
+            RCLCPP_INFO(get_logger(), "Task select received from FC: task=%u", msg.data);
             break;
         }
 
-        case FC_ID_TRAVERSE_TASK_REQUEST: {
+        case FC_ID_CAR_POSITION: {
+            if (len < 1) break;
             auto msg = std_msgs::msg::UInt8();
-            msg.data = 1;
-            task_request_pub_->publish(msg);
-            RCLCPP_INFO(get_logger(), "Traverse task request received");
-            break;
-        }
-
-        case FC_ID_TARGETED_TASK_REQUEST: {
-            auto msg = std_msgs::msg::UInt8();
-            msg.data = 2;
-            task_request_pub_->publish(msg);
-            RCLCPP_INFO(get_logger(), "Targeted task request received");
+            msg.data = data[0];
+            car_position_pub_->publish(msg);
+            RCLCPP_INFO(get_logger(), "Car position received from FC: position=%u", msg.data);
             break;
         }
 
@@ -612,6 +646,9 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr disarm_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr land_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr task_complete_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_payload_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr gripper_close_srv_;
 
     // �������ɿ�ң�⣩
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr att_pub_;
@@ -620,7 +657,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr        fc_vel_pub_;
     rclcpp::Publisher<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr fc_vel_stamped_pub_;
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr task_request_pub_;
-    rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr shelf_target_pub_;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr car_position_pub_;
 
     rclcpp::TimerBase::SharedPtr send_timer_;
 
@@ -628,6 +665,7 @@ private:
     std::mutex serial_write_mutex_;
     int16_t    desired_vel_[4]  = {0, 0, 0, 0};
     rclcpp::Time last_vel_time_;
+    bool last_task_running_ = false;
 
     ActiveCommand active_cmd_;
 

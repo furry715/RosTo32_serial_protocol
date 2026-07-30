@@ -46,6 +46,7 @@ def generate_launch_description():
     use_ego = LaunchConfiguration("use_ego")
     use_mission = LaunchConfiguration("use_mission")
     use_task_manager = LaunchConfiguration("use_task_manager")
+    use_visual_cmd_mux = LaunchConfiguration("use_visual_cmd_mux")
     use_serial = LaunchConfiguration("use_serial")
     rviz = LaunchConfiguration("rviz")
 
@@ -65,6 +66,13 @@ def generate_launch_description():
     mission_file = LaunchConfiguration("mission_file")
     mission_auto_start = LaunchConfiguration("mission_auto_start")
     task_map_file = LaunchConfiguration("task_map_file")
+    visual_cmd_topic = LaunchConfiguration("visual_cmd_topic")
+    visual_seen_topic = LaunchConfiguration("visual_seen_topic")
+    visual_state_topic = LaunchConfiguration("visual_state_topic")
+    mux_goal_topic = LaunchConfiguration("mux_goal_topic")
+    mux_output_cmd_topic = LaunchConfiguration("mux_output_cmd_topic")
+    mux_xy_accel_limit = LaunchConfiguration("mux_xy_accel_limit")
+    mux_visual_disabled_waypoints = LaunchConfiguration("mux_visual_disabled_waypoints")
 
     livox_launch = include_launch(
         "livox_ros_driver2",
@@ -128,6 +136,27 @@ def generate_launch_description():
         condition=IfCondition(use_task_manager),
     )
 
+    visual_cmd_mux_node = Node(
+        package="serial_protocol",
+        executable="visual_cmd_mux_node.py",
+        name="visual_cmd_mux_node",
+        output="screen",
+        parameters=[{
+            "ego_cmd_topic": cmd_vel_topic,
+            "visual_cmd_topic": visual_cmd_topic,
+            "visual_seen_topic": visual_seen_topic,
+            "visual_state_topic": visual_state_topic,
+            "goal_topic": mux_goal_topic,
+            "output_cmd_topic": mux_output_cmd_topic,
+            "xy_accel_limit": mux_xy_accel_limit,
+            "visual_disabled_waypoints": mux_visual_disabled_waypoints,
+            "use_visual_xy_only": True,
+            "require_visual_seen": True,
+            "hold_current_after_visual_loss": True,
+        }],
+        condition=IfCondition(use_visual_cmd_mux),
+    )
+
     serial_node = Node(
         package="serial_protocol",
         executable="serial_protocol_node",
@@ -149,6 +178,7 @@ def generate_launch_description():
         DeclareLaunchArgument("use_ego", default_value="true"),
         DeclareLaunchArgument("use_mission", default_value="false"),
         DeclareLaunchArgument("use_task_manager", default_value="false"),
+        DeclareLaunchArgument("use_visual_cmd_mux", default_value="false"),
         DeclareLaunchArgument("use_serial", default_value="true"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("port", default_value="/dev/ttyACM0"),
@@ -171,12 +201,24 @@ def generate_launch_description():
             ]),
         ),
         DeclareLaunchArgument("task_map_file", default_value=default_task_map_file),
+        DeclareLaunchArgument("visual_cmd_topic", default_value="/visual_track/suggested_cmd_vel"),
+        DeclareLaunchArgument("visual_seen_topic", default_value="/visual_track/target_seen"),
+        DeclareLaunchArgument("visual_state_topic", default_value="/visual_track/state"),
+        DeclareLaunchArgument("mux_goal_topic", default_value="/move_base_simple/goal"),
+        DeclareLaunchArgument("mux_output_cmd_topic", default_value="/cmd_vel"),
+        DeclareLaunchArgument("mux_odom_topic", default_value="/Odometry"),
+        DeclareLaunchArgument("mux_xy_accel_limit", default_value="0.25"),
+        DeclareLaunchArgument(
+            "mux_visual_disabled_waypoints",
+            default_value="return_home_xy,landing_approach",
+        ),
 
         livox_launch,
         TimerAction(period=2.0, actions=[fast_lio_launch]),
         TimerAction(period=4.0, actions=[ekf_launch]),
         TimerAction(period=6.0, actions=[ego_launch]),
         TimerAction(period=8.0, actions=[serial_node]),
+        TimerAction(period=8.5, actions=[visual_cmd_mux_node]),
         TimerAction(period=9.0, actions=[mission_launch]),
         TimerAction(period=9.5, actions=[task_manager_node]),
     ])
