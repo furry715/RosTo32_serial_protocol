@@ -14,6 +14,7 @@
  *   0x04  Payload release/drop, no payload
  *   0x05  Gripper close/tighten, no payload
  *   0x06  Velocity, 8 bytes: int16 LE vx/vy/vz cm/s + yaw deg/s
+ *   0x20  Navigation pose, 15 bytes: int32 LE x/y/z cm + int16 yaw 0.01 deg + uint8 state
  *
  * FC -> ROS:
  *   0x03  Attitude, 7 bytes: roll/pitch/yaw 0.01 deg + state
@@ -29,6 +30,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/quaternion_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/byte_multi_array.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -91,6 +93,7 @@ public:
     static constexpr uint8_t CMD_PAYLOAD_RELEASE = 0x04;
     static constexpr uint8_t CMD_GRIPPER_CLOSE = 0x05;
     static constexpr uint8_t CMD_VELOCITY = 0x06;
+    static constexpr uint8_t CMD_NAV_POSE = 0x20;
     static constexpr uint8_t CMD_HEARTBEAT = 0xFF;  // ��������ռλ�������͵� FC
 
     // �ɿط��͸����ǵ�ң�� ID���� FC UserTask_OneKeyCmd ���룩
@@ -121,6 +124,11 @@ public:
         this->declare_parameter<int>("baud", 115200);
         this->declare_parameter<double>("send_rate_hz", 50.0);
         this->declare_parameter<double>("vel_timeout", 0.2);
+        this->declare_parameter<bool>("nav_pose_tx_enable", false);
+        this->declare_parameter<std::string>("nav_pose_topic", "/Odometry");
+        this->declare_parameter<double>("nav_pose_send_rate_hz", 10.0);
+        this->declare_parameter<double>("nav_pose_max_age", 0.3);
+        this->declare_parameter<int>("nav_pose_state", 0);
 
         std::string port = this->get_parameter("port").as_string();
         int baud = this->get_parameter("baud").as_int();
@@ -141,6 +149,20 @@ public:
         task_running_sub_ = create_subscription<std_msgs::msg::Bool>(
             "/task/running", 10,
             std::bind(&SerialProtocolNode::task_running_callback, this, std::placeholders::_1));
+        if (get_parameter("nav_pose_tx_enable").as_bool()) {
+            const std::string nav_pose_topic = get_parameter("nav_pose_topic").as_string();
+            nav_pose_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+                nav_pose_topic, rclcpp::QoS(20),
+                std::bind(&SerialProtocolNode::nav_pose_callback, this, std::placeholders::_1));
+            const double nav_pose_period =
+                1.0 / std::max(1.0, get_parameter("nav_pose_send_rate_hz").as_double());
+            nav_pose_timer_ = create_wall_timer(
+                std::chrono::duration<double>(nav_pose_period),
+                std::bind(&SerialProtocolNode::nav_pose_timer_callback, this));
+            RCLCPP_INFO(
+                get_logger(), "Navigation pose TX enabled: topic=%s rate=%.1f Hz",
+                nav_pose_topic.c_str(), get_parameter("nav_pose_send_rate_hz").as_double());
+        }
 
         // ���� ���� ��������������������������������������������������������������������������������������������������������������������
         arm_srv_ = create_service<std_srvs::srv::Trigger>(
@@ -222,6 +244,66 @@ private:
         desired_vel_[3] = static_cast<int16_t>(msg->angular.z * 180.0 / M_PI);
         last_vel_time_  = now();
         request_command(CMD_VELOCITY, desired_vel_, PRIORITY_VELOCITY, false);
+    }
+
+    void nav_pose_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        const auto &pos = msg->pose.pose.position;
+        const auto &q = msg->pose.pose.orientation;
+        const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+        const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+        const double yaw_deg = std::atan2(siny_cosp, cosy_cosp) * 180.0 / M_PI;
+
+        std::lock_guard<std::mutex> lock(nav_pose_mutex_);
+        latest_nav_x_ = pos.x;
+        latest_nav_y_ = pos.y;
+        latest_nav_z_ = pos.z;
+        latest_nav_yaw_deg_ = normalize_deg(yaw_deg);
+        latest_nav_pose_rx_time_ = now();
+        has_nav_pose_ = true;
+    }
+
+    void nav_pose_timer_callback()
+    {
+        double x = 0.0, y = 0.0, z = 0.0, yaw_deg = 0.0;
+        rclcpp::Time rx_time;
+        bool has_pose = false;
+        {
+            std::lock_guard<std::mutex> lock(nav_pose_mutex_);
+            has_pose = has_nav_pose_;
+            x = latest_nav_x_;
+            y = latest_nav_y_;
+            z = latest_nav_z_;
+            yaw_deg = latest_nav_yaw_deg_;
+            rx_time = latest_nav_pose_rx_time_;
+        }
+
+        if (!has_pose) return;
+        const double max_age = get_parameter("nav_pose_max_age").as_double();
+        if (max_age > 0.0 && (now() - rx_time).seconds() > max_age) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "Skip stale navigation pose TX: age=%.3fs max=%.3fs",
+                (now() - rx_time).seconds(), max_age);
+            return;
+        }
+
+        const int state = get_parameter("nav_pose_state").as_int();
+        send_nav_pose_frame(x, y, z, yaw_deg, static_cast<uint8_t>(clamp_int(state, 0, 255)));
+    }
+
+    static double normalize_deg(double deg)
+    {
+        while (deg > 180.0) deg -= 360.0;
+        while (deg <= -180.0) deg += 360.0;
+        return deg;
+    }
+
+    static int clamp_int(int value, int low, int high)
+    {
+        if (value < low) return low;
+        if (value > high) return high;
+        return value;
     }
 
     void task_running_callback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -411,6 +493,40 @@ private:
         size_t frame_len = build_frame(buf, id, nullptr, 0);
         std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
         return serial_->write(buf, frame_len);
+    }
+
+    void put_i32_le(uint8_t* dst, int32_t value)
+    {
+        dst[0] = static_cast<uint8_t>(value & 0xFF);
+        dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        dst[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        dst[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+    }
+
+    void put_i16_le(uint8_t* dst, int16_t value)
+    {
+        dst[0] = static_cast<uint8_t>(value & 0xFF);
+        dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    }
+
+    void send_nav_pose_frame(double x_m, double y_m, double z_m, double yaw_deg, uint8_t state)
+    {
+        if (!serial_) return;
+
+        uint8_t data[15];
+        put_i32_le(data + 0, static_cast<int32_t>(std::lround(x_m * 100.0)));
+        put_i32_le(data + 4, static_cast<int32_t>(std::lround(y_m * 100.0)));
+        put_i32_le(data + 8, static_cast<int32_t>(std::lround(z_m * 100.0)));
+        const int yaw_cdeg = static_cast<int>(std::lround(normalize_deg(yaw_deg) * 100.0));
+        put_i16_le(data + 12, static_cast<int16_t>(clamp_int(yaw_cdeg, -32768, 32767)));
+        data[14] = state;
+
+        uint8_t buf[24];
+        const size_t frame_len = build_frame(buf, CMD_NAV_POSE, data, sizeof(data));
+        std::lock_guard<std::mutex> write_lock(serial_write_mutex_);
+        if (!serial_->write(buf, frame_len)) {
+            RCLCPP_ERROR(get_logger(), "Navigation pose serial write failed");
+        }
     }
 
     /** ��ݷ�װ��ֱ�ӷ��ٶ�֡������ʱ�ã�?*/
@@ -641,6 +757,7 @@ private:
     // ����
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr vel_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr task_running_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr nav_pose_sub_;
 
     // ����
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_srv_;
@@ -660,12 +777,21 @@ private:
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr car_position_pub_;
 
     rclcpp::TimerBase::SharedPtr send_timer_;
+    rclcpp::TimerBase::SharedPtr nav_pose_timer_;
 
     std::mutex mutex_;
     std::mutex serial_write_mutex_;
     int16_t    desired_vel_[4]  = {0, 0, 0, 0};
     rclcpp::Time last_vel_time_;
     bool last_task_running_ = false;
+
+    std::mutex nav_pose_mutex_;
+    bool has_nav_pose_ = false;
+    double latest_nav_x_ = 0.0;
+    double latest_nav_y_ = 0.0;
+    double latest_nav_z_ = 0.0;
+    double latest_nav_yaw_deg_ = 0.0;
+    rclcpp::Time latest_nav_pose_rx_time_;
 
     ActiveCommand active_cmd_;
 

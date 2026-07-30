@@ -54,6 +54,11 @@ def generate_launch_description():
     baud = LaunchConfiguration("baud")
     send_rate_hz = LaunchConfiguration("send_rate_hz")
     vel_timeout = LaunchConfiguration("vel_timeout")
+    serial_nav_pose_tx_enable = LaunchConfiguration("serial_nav_pose_tx_enable")
+    serial_nav_pose_topic = LaunchConfiguration("serial_nav_pose_topic")
+    serial_nav_pose_send_rate_hz = LaunchConfiguration("serial_nav_pose_send_rate_hz")
+    serial_nav_pose_max_age = LaunchConfiguration("serial_nav_pose_max_age")
+    serial_nav_pose_state = LaunchConfiguration("serial_nav_pose_state")
 
     odom_topic = LaunchConfiguration("odom_topic")
     cloud_topic = LaunchConfiguration("cloud_topic")
@@ -167,6 +172,11 @@ def generate_launch_description():
             "baud": baud,
             "send_rate_hz": send_rate_hz,
             "vel_timeout": vel_timeout,
+            "nav_pose_tx_enable": serial_nav_pose_tx_enable,
+            "nav_pose_topic": serial_nav_pose_topic,
+            "nav_pose_send_rate_hz": serial_nav_pose_send_rate_hz,
+            "nav_pose_max_age": serial_nav_pose_max_age,
+            "nav_pose_state": serial_nav_pose_state,
         }],
         condition=IfCondition(use_serial),
     )
@@ -185,6 +195,11 @@ def generate_launch_description():
         DeclareLaunchArgument("baud", default_value="115200"),
         DeclareLaunchArgument("send_rate_hz", default_value="50.0"),
         DeclareLaunchArgument("vel_timeout", default_value="0.2"),
+        DeclareLaunchArgument("serial_nav_pose_tx_enable", default_value="true"),
+        DeclareLaunchArgument("serial_nav_pose_topic", default_value="/Odometry"),
+        DeclareLaunchArgument("serial_nav_pose_send_rate_hz", default_value="10.0"),
+        DeclareLaunchArgument("serial_nav_pose_max_age", default_value="0.3"),
+        DeclareLaunchArgument("serial_nav_pose_state", default_value="0"),
         DeclareLaunchArgument("odom_topic", default_value="/Odometry"),
         DeclareLaunchArgument("cloud_topic", default_value="/cloud_registered"),
         DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel"),

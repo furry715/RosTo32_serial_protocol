@@ -32,6 +32,7 @@ add_executable(ego_tracker_node
 ament_target_dependencies(serial_protocol_node
     rclcpp
     geometry_msgs
+    nav_msgs
     std_msgs
     std_srvs
 )
